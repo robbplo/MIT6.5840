@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/rpc"
 	"os"
+	"sort"
 )
 
 // Map functions return a slice of KeyValue.
@@ -28,6 +29,14 @@ func ihash(key string) int {
 	return int(h.Sum32() & 0x7fffffff)
 }
 
+// for sorting by key.
+type ByKey []KeyValue
+
+// for sorting by key.
+func (a ByKey) Len() int           { return len(a) }
+func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
+
 var coordSockName string // socket for coordinator
 
 // main/mrworker.go calls this function.
@@ -39,15 +48,31 @@ func Worker(sockname string, mapf MapF, reducef ReduceF) {
 		fmt.Printf("Failed to register worker, exiting...")
 		os.Exit(1)
 	}
-	nReduce := register.ReduceTasks
+	nReduce := register.Job.NReduce
+	job := register.Job
 
-	for true {
+	// complete map tasks
+	for {
 		mapTask, err := getMapTask()
 		if err != nil {
 			break
 		}
 
 		runMapTask(mapTask, mapf, nReduce)
+	}
+
+	// complete reduce tasks
+	for {
+		reduceTask, err := getReduceTask()
+		if err != nil {
+			fmt.Printf("Failed to get reduce task")
+			os.Exit(1)
+		}
+		if !reduceTask.HasTask {
+			break
+		}
+		runReduceTask(reduceTask, job, reducef)
+
 	}
 }
 
@@ -63,7 +88,7 @@ func runMapTask(mapTask GetMapTaskReply, mapf MapF, nReduce int) error {
 	}
 
 	intermediate := mapf(mapTask.Filename, string(bytes))
-	buckets := map[int][]KeyValue{}
+	buckets := map[int]ByKey{}
 	for _, kv := range intermediate {
 		intermediate_id := ihash(kv.Key) % nReduce
 		bucket := buckets[intermediate_id]
@@ -72,11 +97,11 @@ func runMapTask(mapTask GetMapTaskReply, mapf MapF, nReduce int) error {
 	}
 
 	for i := range nReduce {
+		sort.Sort(buckets[i])
 		filename := fmt.Sprintf("mr-%v-%v", mapTask.TaskId, i)
 		file, err = os.Create(filename)
 		if err != nil {
-			fmt.Printf("Could not open file %v\n", filename)
-			os.Exit(1)
+			return err
 		}
 		defer file.Close()
 		enc := json.NewEncoder(file)
@@ -87,6 +112,51 @@ func runMapTask(mapTask GetMapTaskReply, mapf MapF, nReduce int) error {
 
 	return nil
 }
+
+func runReduceTask(task GetReduceTaskReply, job JobInfo, reducef ReduceF) {
+	outfilename := fmt.Sprintf("mr-out-%v", task.TaskId)
+	outfile, err := os.Create(outfilename)
+	if err != nil {
+		return
+	}
+	defer outfile.Close()
+	kva := ByKey{}
+	for mapId := range job.NMap {
+		intfilename := fmt.Sprintf("mr-%v-%v", mapId, task.TaskId)
+		intfile, err := os.Open(intfilename)
+		if err != nil {
+			return
+		}
+		defer intfile.Close()
+		dec := json.NewDecoder(intfile)
+		for {
+			var kv KeyValue
+			err := dec.Decode(&kv)
+			if err != nil {
+				break
+			}
+			kva = append(kva, kv)
+		}
+	}
+	sort.Sort(kva)
+	i := 0
+	for i < len(kva) {
+		j := i + 1
+		for j < len(kva) && kva[i].Key == kva[j].Key {
+			j++
+		}
+		values := []string{}
+		for k := i; k < j; k++ {
+			values = append(values, kva[k].Value)
+		}
+		output := reducef(kva[i].Key, values)
+		fmt.Fprintf(outfile, "%v %v\n", kva[i].Key, output)
+
+		i = j
+	}
+}
+
+// Coordinator RPCs
 
 func registerWorker() (RegisterWorkerReply, error) {
 	args := RegisterWorkerArgs{}
@@ -104,6 +174,16 @@ func getMapTask() (GetMapTaskReply, error) {
 	ok := call("Coordinator.GetMapTask", &args, &reply)
 	if !ok {
 		return reply, errors.New("No tasks remain")
+	}
+	return reply, nil
+}
+
+func getReduceTask() (GetReduceTaskReply, error) {
+	args := GetReduceTaskArgs{}
+	reply := GetReduceTaskReply{}
+	ok := call("Coordinator.GetReduceTask", &args, &reply)
+	if !ok {
+		return reply, errors.New("Failed to get reduce task")
 	}
 	return reply, nil
 

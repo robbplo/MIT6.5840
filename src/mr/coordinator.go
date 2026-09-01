@@ -8,22 +8,24 @@ import (
 	"net/rpc"
 	"os"
 	"sync"
+	"time"
 )
 
 type Coordinator struct {
 	// Your definitions here.
-	filesToMap    []string
-	reduceTasks   int
-	currentTask   int
-	workerCounter int
-	mu            sync.Mutex
+	job               JobInfo
+	filesToMap        []string
+	currentMapTask    int
+	currentReduceTask int
+	workerCounter     int
+	mu                sync.Mutex
 }
 
 // Your code here -- RPC handlers for the worker to call.
 func (c *Coordinator) RegisterWorker(args *RegisterWorkerArgs, reply *RegisterWorkerReply) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	reply.ReduceTasks = c.reduceTasks
+	reply.Job = c.job
 	reply.Id = c.workerCounter
 	c.workerCounter++
 	return nil
@@ -32,13 +34,29 @@ func (c *Coordinator) RegisterWorker(args *RegisterWorkerArgs, reply *RegisterWo
 func (c *Coordinator) GetMapTask(args *GetMapTaskArgs, reply *GetMapTaskReply) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.currentTask >= len(c.filesToMap) {
+	if c.currentMapTask >= len(c.filesToMap) {
 		return errors.New("No tasks remaining")
 	}
-	current := c.currentTask
-	reply.Filename = c.filesToMap[current]
-	reply.TaskId = c.currentTask
-	c.currentTask++
+	reply.Filename = c.filesToMap[c.currentMapTask]
+	reply.TaskId = c.currentMapTask
+	c.currentMapTask++
+	return nil
+}
+
+func (c *Coordinator) GetReduceTask(args *GetReduceTaskArgs, reply *GetReduceTaskReply) error {
+	for c.currentMapTask < len(c.filesToMap) {
+		time.Sleep(time.Millisecond * 10)
+		println("waiting for map to finish")
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.currentReduceTask >= c.job.NReduce {
+		reply.HasTask = false
+		return nil
+	}
+	reply.HasTask = true
+	reply.TaskId = c.currentReduceTask
+	c.currentReduceTask++
 	return nil
 }
 
@@ -57,11 +75,9 @@ func (c *Coordinator) server(sockname string) {
 // main/mrcoordinator.go calls Done() periodically to find out
 // if the entire job has finished.
 func (c *Coordinator) Done() bool {
-	ret := false
-
-	// Your code here.
-
-	return ret
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.currentReduceTask >= c.job.NReduce
 }
 
 // create a Coordinator.
@@ -69,11 +85,10 @@ func (c *Coordinator) Done() bool {
 // nReduce is the number of reduce tasks to use.
 func MakeCoordinator(sockname string, files []string, nReduce int) *Coordinator {
 	c := Coordinator{}
+	c.job.NMap = len(files)
+	c.job.NReduce = nReduce
 	c.filesToMap = files
-	c.reduceTasks = nReduce
 	c.workerCounter = 0
-
-	// Your code here.
 
 	c.server(sockname)
 	return &c
