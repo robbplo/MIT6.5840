@@ -1,28 +1,44 @@
 package mr
 
-import "log"
-import "net"
-import "os"
-import "net/rpc"
-import "net/http"
+import (
+	"errors"
+	"log"
+	"net"
+	"net/http"
+	"net/rpc"
+	"os"
+	"sync"
+)
 
 type Coordinator struct {
 	// Your definitions here.
-	filesToMap []string
+	filesToMap    []string
+	reduceTasks   int
+	currentTask   int
+	workerCounter int
+	mu            sync.Mutex
 }
 
 // Your code here -- RPC handlers for the worker to call.
-
-// an example RPC handler.
-//
-// the RPC argument and reply types are defined in rpc.go.
-func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
-	reply.Y = args.X + 1
+func (c *Coordinator) RegisterWorker(args *RegisterWorkerArgs, reply *RegisterWorkerReply) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	reply.ReduceTasks = c.reduceTasks
+	reply.Id = c.workerCounter
+	c.workerCounter++
 	return nil
 }
 
 func (c *Coordinator) GetMapTask(args *GetMapTaskArgs, reply *GetMapTaskReply) error {
-	reply.Filename = c.filesToMap[0]
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.currentTask >= len(c.filesToMap) {
+		return errors.New("No tasks remaining")
+	}
+	current := c.currentTask
+	reply.Filename = c.filesToMap[current]
+	reply.TaskId = c.currentTask
+	c.currentTask++
 	return nil
 }
 
@@ -54,6 +70,8 @@ func (c *Coordinator) Done() bool {
 func MakeCoordinator(sockname string, files []string, nReduce int) *Coordinator {
 	c := Coordinator{}
 	c.filesToMap = files
+	c.reduceTasks = nReduce
+	c.workerCounter = 0
 
 	// Your code here.
 

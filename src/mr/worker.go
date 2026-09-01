@@ -1,6 +1,8 @@
 package mr
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"io"
@@ -15,6 +17,9 @@ type KeyValue struct {
 	Value string
 }
 
+type MapF func(string, string) []KeyValue
+type ReduceF func(string, []string) string
+
 // use ihash(key) % NReduce to choose the reduce
 // task number for each KeyValue emitted by Map.
 func ihash(key string) int {
@@ -26,36 +31,81 @@ func ihash(key string) int {
 var coordSockName string // socket for coordinator
 
 // main/mrworker.go calls this function.
-func Worker(sockname string, mapf func(string, string) []KeyValue,
-	reducef func(string, []string) string) {
-
+func Worker(sockname string, mapf MapF, reducef ReduceF) {
 	coordSockName = sockname
 
-	filename := GetMapTask()
-	file, err := os.Open(filename)
+	register, err := registerWorker()
 	if err != nil {
-		fmt.Printf("Could not open file %v\n", filename)
+		fmt.Printf("Failed to register worker, exiting...")
+		os.Exit(1)
 	}
-	bytes, err := io.ReadAll(file)
-	if err != nil {
-		fmt.Printf("Could not read file %v\n", filename)
+	nReduce := register.ReduceTasks
+
+	for true {
+		mapTask, err := getMapTask()
+		if err != nil {
+			break
+		}
+
+		runMapTask(mapTask, mapf, nReduce)
 	}
-
-	intermediate := mapf(filename, string(bytes))
-	fmt.Printf("int: %v", intermediate[0])
-
 }
 
-func GetMapTask() string {
+func runMapTask(mapTask GetMapTaskReply, mapf MapF, nReduce int) error {
+	file, err := os.Open(mapTask.Filename)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	bytes, err := io.ReadAll(file)
+	if err != nil {
+		return err
+	}
+
+	intermediate := mapf(mapTask.Filename, string(bytes))
+	buckets := map[int][]KeyValue{}
+	for _, kv := range intermediate {
+		intermediate_id := ihash(kv.Key) % nReduce
+		bucket := buckets[intermediate_id]
+		bucket = append(bucket, kv)
+		buckets[intermediate_id] = bucket
+	}
+
+	for i := range nReduce {
+		filename := fmt.Sprintf("mr-%v-%v", mapTask.TaskId, i)
+		file, err = os.Create(filename)
+		if err != nil {
+			fmt.Printf("Could not open file %v\n", filename)
+			os.Exit(1)
+		}
+		defer file.Close()
+		enc := json.NewEncoder(file)
+		for _, kv := range buckets[i] {
+			enc.Encode(kv)
+		}
+	}
+
+	return nil
+}
+
+func registerWorker() (RegisterWorkerReply, error) {
+	args := RegisterWorkerArgs{}
+	reply := RegisterWorkerReply{}
+	ok := call("Coordinator.RegisterWorker", &args, &reply)
+	if !ok {
+		return reply, errors.New("Failed to register worker")
+	}
+	return reply, nil
+}
+
+func getMapTask() (GetMapTaskReply, error) {
 	args := GetMapTaskArgs{}
 	reply := GetMapTaskReply{}
 	ok := call("Coordinator.GetMapTask", &args, &reply)
-	if ok {
-		fmt.Printf("reply.Filename %v\n", reply.Filename)
-	} else {
-		fmt.Printf("call failed!\n")
+	if !ok {
+		return reply, errors.New("No tasks remain")
 	}
-	return reply.Filename
+	return reply, nil
 
 }
 
