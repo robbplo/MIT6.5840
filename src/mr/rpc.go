@@ -20,18 +20,29 @@ type RegisterWorkerReply struct {
 	Job         JobInfo
 }
 
-type GetMapTaskArgs struct {
-}
+type TaskKind uint8
 
-type GetMapTaskReply struct {
+const (
+	TaskWait TaskKind = iota
+	TaskMap
+	TaskReduce
+	TaskExit
+)
+
+type MapTask struct {
 	Filename string
 	TaskId   int
 }
 
-type GetReduceTaskArgs struct {
+type ReduceTask struct {
+	TaskId int
 }
 
-type GetReduceTaskReply struct {
-	HasTask bool
-	TaskId  int
+type GetTaskArgs struct {
+}
+
+type GetTaskReply struct {
+	Kind   TaskKind
+	Map    MapTask
+	Reduce ReduceTask
 }

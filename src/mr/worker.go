@@ -10,6 +10,7 @@ import (
 	"net/rpc"
 	"os"
 	"sort"
+	"time"
 )
 
 // Map functions return a slice of KeyValue.
@@ -46,37 +47,30 @@ func Worker(sockname string, mapf MapF, reducef ReduceF) {
 	register, err := registerWorker()
 	if err != nil {
 		fmt.Printf("Failed to register worker, exiting...")
-		os.Exit(1)
+		return
 	}
 	nReduce := register.Job.NReduce
 	job := register.Job
 
-	// complete map tasks
 	for {
-		mapTask, err := getMapTask()
+		taskReply, err := getTask()
 		if err != nil {
 			break
 		}
-
-		runMapTask(mapTask, mapf, nReduce)
-	}
-
-	// complete reduce tasks
-	for {
-		reduceTask, err := getReduceTask()
-		if err != nil {
-			fmt.Printf("Failed to get reduce task")
-			os.Exit(1)
+		switch taskReply.Kind {
+		case TaskMap:
+			runMapTask(taskReply.Map, mapf, nReduce)
+		case TaskReduce:
+			runReduceTask(taskReply.Reduce, job, reducef)
+		case TaskWait:
+			time.Sleep(time.Second)
+		case TaskExit:
+			return
 		}
-		if !reduceTask.HasTask {
-			break
-		}
-		runReduceTask(reduceTask, job, reducef)
-
 	}
 }
 
-func runMapTask(mapTask GetMapTaskReply, mapf MapF, nReduce int) error {
+func runMapTask(mapTask MapTask, mapf MapF, nReduce int) error {
 	file, err := os.Open(mapTask.Filename)
 	if err != nil {
 		return err
@@ -113,7 +107,7 @@ func runMapTask(mapTask GetMapTaskReply, mapf MapF, nReduce int) error {
 	return nil
 }
 
-func runReduceTask(task GetReduceTaskReply, job JobInfo, reducef ReduceF) {
+func runReduceTask(task ReduceTask, job JobInfo, reducef ReduceF) {
 	outfilename := fmt.Sprintf("mr-out-%v", task.TaskId)
 	outfile, err := os.Create(outfilename)
 	if err != nil {
@@ -168,25 +162,14 @@ func registerWorker() (RegisterWorkerReply, error) {
 	return reply, nil
 }
 
-func getMapTask() (GetMapTaskReply, error) {
-	args := GetMapTaskArgs{}
-	reply := GetMapTaskReply{}
-	ok := call("Coordinator.GetMapTask", &args, &reply)
+func getTask() (GetTaskReply, error) {
+	args := GetTaskArgs{}
+	reply := GetTaskReply{}
+	ok := call("Coordinator.GetTask", &args, &reply)
 	if !ok {
 		return reply, errors.New("No tasks remain")
 	}
 	return reply, nil
-}
-
-func getReduceTask() (GetReduceTaskReply, error) {
-	args := GetReduceTaskArgs{}
-	reply := GetReduceTaskReply{}
-	ok := call("Coordinator.GetReduceTask", &args, &reply)
-	if !ok {
-		return reply, errors.New("Failed to get reduce task")
-	}
-	return reply, nil
-
 }
 
 // send an RPC request to the coordinator, wait for the response.

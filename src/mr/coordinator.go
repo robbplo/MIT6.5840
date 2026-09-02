@@ -1,14 +1,12 @@
 package mr
 
 import (
-	"errors"
 	"log"
 	"net"
 	"net/http"
 	"net/rpc"
 	"os"
 	"sync"
-	"time"
 )
 
 type Coordinator struct {
@@ -21,6 +19,9 @@ type Coordinator struct {
 	mu                sync.Mutex
 }
 
+// TODO: mark jobs completed
+// TODO: reassign jobs after x amount of time
+
 // Your code here -- RPC handlers for the worker to call.
 func (c *Coordinator) RegisterWorker(args *RegisterWorkerArgs, reply *RegisterWorkerReply) error {
 	c.mu.Lock()
@@ -31,33 +32,32 @@ func (c *Coordinator) RegisterWorker(args *RegisterWorkerArgs, reply *RegisterWo
 	return nil
 }
 
-func (c *Coordinator) GetMapTask(args *GetMapTaskArgs, reply *GetMapTaskReply) error {
+func (c *Coordinator) GetTask(args *GetTaskArgs, reply *GetTaskReply) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.currentMapTask >= len(c.filesToMap) {
-		return errors.New("No tasks remaining")
+		kind, reduceTask := c.getReduceTask()
+		reply.Kind = kind
+		reply.Reduce = reduceTask
+		return nil
 	}
-	reply.Filename = c.filesToMap[c.currentMapTask]
-	reply.TaskId = c.currentMapTask
+	reply.Kind = TaskMap
+	reply.Map.Filename = c.filesToMap[c.currentMapTask]
+	reply.Map.TaskId = c.currentMapTask
 	c.currentMapTask++
 	return nil
 }
 
-func (c *Coordinator) GetReduceTask(args *GetReduceTaskArgs, reply *GetReduceTaskReply) error {
-	for c.currentMapTask < len(c.filesToMap) {
-		time.Sleep(time.Millisecond * 10)
-		println("waiting for map to finish")
+func (c *Coordinator) getReduceTask() (TaskKind, ReduceTask) {
+	if c.currentMapTask < len(c.filesToMap) {
+		return TaskWait, ReduceTask{}
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	if c.currentReduceTask >= c.job.NReduce {
-		reply.HasTask = false
-		return nil
+		return TaskExit, ReduceTask{}
 	}
-	reply.HasTask = true
-	reply.TaskId = c.currentReduceTask
+	taskId := c.currentReduceTask
 	c.currentReduceTask++
-	return nil
+	return TaskReduce, ReduceTask{TaskId: taskId}
 }
 
 // start a thread that listens for RPCs from worker.go
