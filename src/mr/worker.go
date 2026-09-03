@@ -40,7 +40,7 @@ func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
 
 var coordSockName string // socket for coordinator
 
-type WorkerState struct {
+type worker struct {
 	job      JobInfo
 	mapf     MapF
 	reducef  ReduceF
@@ -48,7 +48,7 @@ type WorkerState struct {
 }
 
 // main/mrworker.go calls this function.
-func Worker(sockname string, mapf MapF, reducef ReduceF) {
+func RunWorker(sockname string, mapf MapF, reducef ReduceF) {
 	coordSockName = sockname
 
 	worker, err := registerWorker(mapf, reducef)
@@ -75,7 +75,7 @@ func Worker(sockname string, mapf MapF, reducef ReduceF) {
 	}
 }
 
-func (w *WorkerState) runMapTask(mapTask MapTask) error {
+func (w *worker) runMapTask(mapTask MapTask) error {
 	file, err := os.Open(mapTask.Filename)
 	if err != nil {
 		return err
@@ -117,7 +117,7 @@ func (w *WorkerState) runMapTask(mapTask MapTask) error {
 	return nil
 }
 
-func (w *WorkerState) runReduceTask(task ReduceTask) {
+func (w *worker) runReduceTask(task ReduceTask) {
 	outfilename := fmt.Sprintf("mr-out-%v", task.TaskId)
 	outfile, err := os.Create(outfilename)
 	if err != nil {
@@ -164,19 +164,25 @@ func (w *WorkerState) runReduceTask(task ReduceTask) {
 
 // Coordinator RPCs
 
-func registerWorker(mapf MapF, reducef ReduceF) (WorkerState, error) {
+func registerWorker(mapf MapF, reducef ReduceF) (worker, error) {
 	args := RegisterWorkerArgs{}
 	reply := RegisterWorkerReply{}
-	state := WorkerState{}
+	w := worker{}
 	ok := call("Coordinator.RegisterWorker", &args, &reply)
 	if !ok {
-		return state, errors.New("Failed to register worker")
+		return w, errors.New("Failed to register worker")
 	}
-	state.job = reply.Job
-	state.workerId = reply.WorkerId
-	state.mapf = mapf
-	state.reducef = reducef
-	return state, nil
+	w.job = reply.Job
+	w.workerId = reply.WorkerId
+	w.mapf = mapf
+	w.reducef = reducef
+	go func() {
+		for {
+			heartbeat(w.workerId)
+			time.Sleep(time.Second)
+		}
+	}()
+	return w, nil
 }
 
 func getTask() (GetTaskReply, error) {
@@ -200,6 +206,17 @@ func completeTask(workerId int, kind TaskKind, taskId int) (CompleteTaskReply, e
 		return reply, errors.New("Failed to complete task")
 	}
 	return reply, nil
+}
+
+func heartbeat(workerId int) error {
+	args := HeartbeatArgs{}
+	reply := HeartbeatReply{}
+	args.WorkerId = workerId
+	ok := call("Coordinator.Heartbeat", &args, &reply)
+	if !ok {
+		return errors.New("Heartbeat failed")
+	}
+	return nil
 }
 
 // send an RPC request to the coordinator, wait for the response.

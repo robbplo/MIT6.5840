@@ -2,13 +2,13 @@ package mr
 
 import (
 	"errors"
-	"fmt"
 	"log"
 	"net"
 	"net/http"
 	"net/rpc"
 	"os"
 	"sync"
+	"time"
 )
 
 type Coordinator struct {
@@ -20,11 +20,12 @@ type Coordinator struct {
 	completedMapTasks    map[int]int
 	completedReduceTasks map[int]int
 	workerCounter        int
+	workerHeartbeats     map[int]time.Time
+	workerDead           map[int]bool
 	mu                   sync.Mutex
 }
 
-// TODO: mark jobs completed
-// TODO: unmark map jobs
+// TODO: unmark map jobs on worker failure
 // TODO: reassign jobs after x amount of time
 
 // Your code here -- RPC handlers for the worker to call.
@@ -33,6 +34,7 @@ func (c *Coordinator) RegisterWorker(args *RegisterWorkerArgs, reply *RegisterWo
 	defer c.mu.Unlock()
 	reply.Job = c.job
 	reply.WorkerId = c.workerCounter
+	c.workerHeartbeats[c.workerCounter] = time.Now()
 	c.workerCounter++
 	return nil
 }
@@ -40,6 +42,10 @@ func (c *Coordinator) RegisterWorker(args *RegisterWorkerArgs, reply *RegisterWo
 func (c *Coordinator) GetTask(args *GetTaskArgs, reply *GetTaskReply) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.workerDead[args.WorkerId] {
+		reply.Kind = TaskExit
+		return nil
+	}
 	for i := 0; i < len(c.filesToMap); i++ {
 		_, ok := c.mapTasks[i]
 		if !ok {
@@ -60,7 +66,7 @@ func (c *Coordinator) GetTask(args *GetTaskArgs, reply *GetTaskReply) error {
 func (c *Coordinator) CompleteTask(args *CompleteTaskArgs, reply *CompleteTaskReply) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	fmt.Printf("complete task %v\n", args.TaskId)
+	// fmt.Printf("complete task %v\n", args.TaskId)
 	if args.Kind == TaskMap {
 		c.completedMapTasks[args.TaskId] = args.WorkerId
 		return nil
@@ -70,6 +76,14 @@ func (c *Coordinator) CompleteTask(args *CompleteTaskArgs, reply *CompleteTaskRe
 		return nil
 	}
 	return errors.New("Invalid task kind")
+}
+
+func (c *Coordinator) Heartbeat(args *HeartbeatArgs, reply *HeartbeatReply) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.workerHeartbeats[args.WorkerId] = time.Now()
+
+	return nil
 }
 
 func (c *Coordinator) getReduceTask(args *GetTaskArgs) (TaskKind, ReduceTask) {
@@ -87,6 +101,36 @@ func (c *Coordinator) getReduceTask(args *GetTaskArgs) (TaskKind, ReduceTask) {
 	return TaskWait, ReduceTask{}
 }
 
+func (c *Coordinator) checkLiveness() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	now := time.Now()
+	for workerId, timestamp := range c.workerHeartbeats {
+		if now.After(timestamp.Add(time.Second * 3)) {
+			c.killWorker(workerId)
+		}
+	}
+}
+
+func (c *Coordinator) killWorker(deadWorkerId int) {
+	c.workerDead[deadWorkerId] = true
+	for i, workerId := range c.completedMapTasks {
+		if workerId == deadWorkerId {
+			delete(c.completedMapTasks, i)
+		}
+	}
+	for i, workerId := range c.mapTasks {
+		if workerId == deadWorkerId {
+			delete(c.mapTasks, i)
+		}
+	}
+	for i, workerId := range c.reduceTasks {
+		if workerId == deadWorkerId {
+			delete(c.reduceTasks, i)
+		}
+	}
+}
+
 // start a thread that listens for RPCs from worker.go
 func (c *Coordinator) server(sockname string) {
 	rpc.Register(c)
@@ -97,6 +141,12 @@ func (c *Coordinator) server(sockname string) {
 		log.Fatalf("listen error %s: %v", sockname, e)
 	}
 	go http.Serve(l, nil)
+	go func() {
+		for {
+			c.checkLiveness()
+			time.Sleep(time.Second)
+		}
+	}()
 }
 
 // main/mrcoordinator.go calls Done() periodically to find out
@@ -124,6 +174,8 @@ func MakeCoordinator(sockname string, files []string, nReduce int) *Coordinator 
 	c.reduceTasks = map[int]int{}
 	c.completedMapTasks = map[int]int{}
 	c.completedReduceTasks = map[int]int{}
+	c.workerHeartbeats = map[int]time.Time{}
+	c.workerDead = map[int]bool{}
 	c.server(sockname)
 	return &c
 }

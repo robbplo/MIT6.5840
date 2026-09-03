@@ -11,8 +11,7 @@ type JobInfo struct {
 	NReduce int
 }
 
-type RegisterWorkerArgs struct {
-}
+type RegisterWorkerArgs struct{}
 
 type RegisterWorkerReply struct {
 	WorkerId    int
@@ -54,5 +53,9 @@ type CompleteTaskArgs struct {
 	TaskId   int
 }
 
-type CompleteTaskReply struct {
+type CompleteTaskReply struct{}
+
+type HeartbeatArgs struct {
+	WorkerId int
 }
+type HeartbeatReply struct { }

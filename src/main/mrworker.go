@@ -24,7 +24,7 @@ func main() {
 
 	mapf, reducef := loadPlugin(os.Args[1])
 
-	mr.Worker(os.Args[2], mapf, reducef)
+	mr.RunWorker(os.Args[2], mapf, reducef)
 }
 
 // load the application Map and Reduce functions
