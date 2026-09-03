@@ -40,17 +40,22 @@ func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
 
 var coordSockName string // socket for coordinator
 
+type WorkerState struct {
+	job      JobInfo
+	mapf     MapF
+	reducef  ReduceF
+	workerId int
+}
+
 // main/mrworker.go calls this function.
 func Worker(sockname string, mapf MapF, reducef ReduceF) {
 	coordSockName = sockname
 
-	register, err := registerWorker()
+	worker, err := registerWorker(mapf, reducef)
 	if err != nil {
 		fmt.Printf("Failed to register worker, exiting...")
 		return
 	}
-	nReduce := register.Job.NReduce
-	job := register.Job
 
 	for {
 		taskReply, err := getTask()
@@ -59,9 +64,9 @@ func Worker(sockname string, mapf MapF, reducef ReduceF) {
 		}
 		switch taskReply.Kind {
 		case TaskMap:
-			runMapTask(taskReply.Map, mapf, nReduce)
+			worker.runMapTask(taskReply.Map)
 		case TaskReduce:
-			runReduceTask(taskReply.Reduce, job, reducef)
+			worker.runReduceTask(taskReply.Reduce)
 		case TaskWait:
 			time.Sleep(time.Second)
 		case TaskExit:
@@ -70,7 +75,7 @@ func Worker(sockname string, mapf MapF, reducef ReduceF) {
 	}
 }
 
-func runMapTask(mapTask MapTask, mapf MapF, nReduce int) error {
+func (w *WorkerState) runMapTask(mapTask MapTask) error {
 	file, err := os.Open(mapTask.Filename)
 	if err != nil {
 		return err
@@ -81,16 +86,16 @@ func runMapTask(mapTask MapTask, mapf MapF, nReduce int) error {
 		return err
 	}
 
-	intermediate := mapf(mapTask.Filename, string(bytes))
+	intermediate := w.mapf(mapTask.Filename, string(bytes))
 	buckets := map[int]ByKey{}
 	for _, kv := range intermediate {
-		intermediate_id := ihash(kv.Key) % nReduce
+		intermediate_id := ihash(kv.Key) % w.job.NReduce
 		bucket := buckets[intermediate_id]
 		bucket = append(bucket, kv)
 		buckets[intermediate_id] = bucket
 	}
 
-	for i := range nReduce {
+	for i := range w.job.NReduce {
 		sort.Sort(buckets[i])
 		filename := fmt.Sprintf("mr-%v-%v", mapTask.TaskId, i)
 		file, err = os.Create(filename)
@@ -104,10 +109,15 @@ func runMapTask(mapTask MapTask, mapf MapF, nReduce int) error {
 		}
 	}
 
+	_, err = completeTask(w.workerId, TaskMap, mapTask.TaskId)
+	if err != nil {
+		return err
+	}
+
 	return nil
 }
 
-func runReduceTask(task ReduceTask, job JobInfo, reducef ReduceF) {
+func (w *WorkerState) runReduceTask(task ReduceTask) {
 	outfilename := fmt.Sprintf("mr-out-%v", task.TaskId)
 	outfile, err := os.Create(outfilename)
 	if err != nil {
@@ -115,7 +125,7 @@ func runReduceTask(task ReduceTask, job JobInfo, reducef ReduceF) {
 	}
 	defer outfile.Close()
 	kva := ByKey{}
-	for mapId := range job.NMap {
+	for mapId := range w.job.NMap {
 		intfilename := fmt.Sprintf("mr-%v-%v", mapId, task.TaskId)
 		intfile, err := os.Open(intfilename)
 		if err != nil {
@@ -143,23 +153,30 @@ func runReduceTask(task ReduceTask, job JobInfo, reducef ReduceF) {
 		for k := i; k < j; k++ {
 			values = append(values, kva[k].Value)
 		}
-		output := reducef(kva[i].Key, values)
+		output := w.reducef(kva[i].Key, values)
 		fmt.Fprintf(outfile, "%v %v\n", kva[i].Key, output)
 
 		i = j
 	}
+
+	completeTask(w.workerId, TaskReduce, task.TaskId)
 }
 
 // Coordinator RPCs
 
-func registerWorker() (RegisterWorkerReply, error) {
+func registerWorker(mapf MapF, reducef ReduceF) (WorkerState, error) {
 	args := RegisterWorkerArgs{}
 	reply := RegisterWorkerReply{}
+	state := WorkerState{}
 	ok := call("Coordinator.RegisterWorker", &args, &reply)
 	if !ok {
-		return reply, errors.New("Failed to register worker")
+		return state, errors.New("Failed to register worker")
 	}
-	return reply, nil
+	state.job = reply.Job
+	state.workerId = reply.WorkerId
+	state.mapf = mapf
+	state.reducef = reducef
+	return state, nil
 }
 
 func getTask() (GetTaskReply, error) {
@@ -167,7 +184,20 @@ func getTask() (GetTaskReply, error) {
 	reply := GetTaskReply{}
 	ok := call("Coordinator.GetTask", &args, &reply)
 	if !ok {
-		return reply, errors.New("No tasks remain")
+		return reply, errors.New("Failed to get task")
+	}
+	return reply, nil
+}
+
+func completeTask(workerId int, kind TaskKind, taskId int) (CompleteTaskReply, error) {
+	args := CompleteTaskArgs{}
+	reply := CompleteTaskReply{}
+	args.WorkerId = workerId
+	args.Kind = kind
+	args.TaskId = taskId
+	ok := call("Coordinator.CompleteTask", &args, &reply)
+	if !ok {
+		return reply, errors.New("Failed to complete task")
 	}
 	return reply, nil
 }
@@ -186,6 +216,6 @@ func call(rpcname string, args interface{}, reply interface{}) bool {
 	if err := c.Call(rpcname, args, reply); err == nil {
 		return true
 	}
-	log.Printf("%d: call failed err %v", os.Getpid(), err)
+	log.Printf("%d: call to %v failed err %v", os.Getpid(), rpcname, err)
 	return false
 }

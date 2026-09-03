@@ -1,6 +1,8 @@
 package mr
 
 import (
+	"errors"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -11,15 +13,18 @@ import (
 
 type Coordinator struct {
 	// Your definitions here.
-	job               JobInfo
-	filesToMap        []string
-	currentMapTask    int
-	currentReduceTask int
-	workerCounter     int
-	mu                sync.Mutex
+	job                  JobInfo
+	filesToMap           []string
+	mapTasks             map[int]int
+	reduceTasks          map[int]int
+	completedMapTasks    map[int]int
+	completedReduceTasks map[int]int
+	workerCounter        int
+	mu                   sync.Mutex
 }
 
 // TODO: mark jobs completed
+// TODO: unmark map jobs
 // TODO: reassign jobs after x amount of time
 
 // Your code here -- RPC handlers for the worker to call.
@@ -27,7 +32,7 @@ func (c *Coordinator) RegisterWorker(args *RegisterWorkerArgs, reply *RegisterWo
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	reply.Job = c.job
-	reply.Id = c.workerCounter
+	reply.WorkerId = c.workerCounter
 	c.workerCounter++
 	return nil
 }
@@ -35,29 +40,51 @@ func (c *Coordinator) RegisterWorker(args *RegisterWorkerArgs, reply *RegisterWo
 func (c *Coordinator) GetTask(args *GetTaskArgs, reply *GetTaskReply) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.currentMapTask >= len(c.filesToMap) {
-		kind, reduceTask := c.getReduceTask()
-		reply.Kind = kind
-		reply.Reduce = reduceTask
-		return nil
+	for i := 0; i < len(c.filesToMap); i++ {
+		_, ok := c.mapTasks[i]
+		if !ok {
+			c.mapTasks[i] = args.WorkerId
+			reply.Kind = TaskMap
+			reply.Map.Filename = c.filesToMap[i]
+			reply.Map.TaskId = i
+			return nil
+		}
 	}
-	reply.Kind = TaskMap
-	reply.Map.Filename = c.filesToMap[c.currentMapTask]
-	reply.Map.TaskId = c.currentMapTask
-	c.currentMapTask++
+
+	kind, reduceTask := c.getReduceTask(args)
+	reply.Kind = kind
+	reply.Reduce = reduceTask
 	return nil
 }
 
-func (c *Coordinator) getReduceTask() (TaskKind, ReduceTask) {
-	if c.currentMapTask < len(c.filesToMap) {
-		return TaskWait, ReduceTask{}
+func (c *Coordinator) CompleteTask(args *CompleteTaskArgs, reply *CompleteTaskReply) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	fmt.Printf("complete task %v\n", args.TaskId)
+	if args.Kind == TaskMap {
+		c.completedMapTasks[args.TaskId] = args.WorkerId
+		return nil
 	}
-	if c.currentReduceTask >= c.job.NReduce {
+	if args.Kind == TaskReduce {
+		c.completedReduceTasks[args.TaskId] = args.WorkerId
+		return nil
+	}
+	return errors.New("Invalid task kind")
+}
+
+func (c *Coordinator) getReduceTask(args *GetTaskArgs) (TaskKind, ReduceTask) {
+	for i := 0; i < c.job.NReduce; i++ {
+		_, ok := c.reduceTasks[i]
+		if !ok {
+			c.reduceTasks[i] = args.WorkerId
+			taskId := i
+			return TaskReduce, ReduceTask{TaskId: taskId}
+		}
+	}
+	if len(c.completedReduceTasks) == c.job.NReduce {
 		return TaskExit, ReduceTask{}
 	}
-	taskId := c.currentReduceTask
-	c.currentReduceTask++
-	return TaskReduce, ReduceTask{TaskId: taskId}
+	return TaskWait, ReduceTask{}
 }
 
 // start a thread that listens for RPCs from worker.go
@@ -77,7 +104,11 @@ func (c *Coordinator) server(sockname string) {
 func (c *Coordinator) Done() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.currentReduceTask >= c.job.NReduce
+	reduce := len(c.completedReduceTasks)
+	// mapcount := len(c.completedMapTasks)
+	// fmt.Printf("Map: %v tasks out of %v\n", mapcount, c.job.NMap)
+	// fmt.Printf("Reduce: %v tasks out of %v\n", reduce, c.job.NReduce)
+	return reduce == c.job.NReduce
 }
 
 // create a Coordinator.
@@ -89,7 +120,10 @@ func MakeCoordinator(sockname string, files []string, nReduce int) *Coordinator 
 	c.job.NReduce = nReduce
 	c.filesToMap = files
 	c.workerCounter = 0
-
+	c.mapTasks = map[int]int{}
+	c.reduceTasks = map[int]int{}
+	c.completedMapTasks = map[int]int{}
+	c.completedReduceTasks = map[int]int{}
 	c.server(sockname)
 	return &c
 }

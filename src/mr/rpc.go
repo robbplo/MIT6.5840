@@ -15,7 +15,7 @@ type RegisterWorkerArgs struct {
 }
 
 type RegisterWorkerReply struct {
-	Id          int
+	WorkerId    int
 	ReduceTasks int
 	Job         JobInfo
 }
@@ -39,10 +39,20 @@ type ReduceTask struct {
 }
 
 type GetTaskArgs struct {
+	WorkerId int
 }
 
 type GetTaskReply struct {
 	Kind   TaskKind
 	Map    MapTask
 	Reduce ReduceTask
+}
+
+type CompleteTaskArgs struct {
+	Kind     TaskKind
+	WorkerId int
+	TaskId   int
+}
+
+type CompleteTaskReply struct {
 }
