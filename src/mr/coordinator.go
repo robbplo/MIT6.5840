@@ -87,6 +87,9 @@ func (c *Coordinator) Heartbeat(args *HeartbeatArgs, reply *HeartbeatReply) erro
 }
 
 func (c *Coordinator) getReduceTask(args *GetTaskArgs) (TaskKind, ReduceTask) {
+	if len(c.completedMapTasks) != c.job.NMap {
+		return TaskWait, ReduceTask{}
+	}
 	for i := 0; i < c.job.NReduce; i++ {
 		_, ok := c.reduceTasks[i]
 		if !ok {
