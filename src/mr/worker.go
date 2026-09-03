@@ -58,7 +58,7 @@ func RunWorker(sockname string, mapf MapF, reducef ReduceF) {
 	}
 
 	for {
-		taskReply, err := getTask()
+		taskReply, err := getTask(worker.workerId)
 		if err != nil {
 			break
 		}
@@ -185,9 +185,10 @@ func registerWorker(mapf MapF, reducef ReduceF) (worker, error) {
 	return w, nil
 }
 
-func getTask() (GetTaskReply, error) {
+func getTask(workerId int) (GetTaskReply, error) {
 	args := GetTaskArgs{}
 	reply := GetTaskReply{}
+	args.WorkerId = workerId
 	ok := call("Coordinator.GetTask", &args, &reply)
 	if !ok {
 		return reply, errors.New("Failed to get task")

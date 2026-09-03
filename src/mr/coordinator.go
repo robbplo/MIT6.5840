@@ -25,9 +25,6 @@ type Coordinator struct {
 	mu                   sync.Mutex
 }
 
-// TODO: unmark map jobs on worker failure
-// TODO: reassign jobs after x amount of time
-
 // Your code here -- RPC handlers for the worker to call.
 func (c *Coordinator) RegisterWorker(args *RegisterWorkerArgs, reply *RegisterWorkerReply) error {
 	c.mu.Lock()
@@ -66,7 +63,6 @@ func (c *Coordinator) GetTask(args *GetTaskArgs, reply *GetTaskReply) error {
 func (c *Coordinator) CompleteTask(args *CompleteTaskArgs, reply *CompleteTaskReply) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	// fmt.Printf("complete task %v\n", args.TaskId)
 	if args.Kind == TaskMap {
 		c.completedMapTasks[args.TaskId] = args.WorkerId
 		return nil
@@ -109,7 +105,7 @@ func (c *Coordinator) checkLiveness() {
 	defer c.mu.Unlock()
 	now := time.Now()
 	for workerId, timestamp := range c.workerHeartbeats {
-		if now.After(timestamp.Add(time.Second * 3)) {
+		if now.After(timestamp.Add(time.Second * 10)) {
 			c.killWorker(workerId)
 		}
 	}
@@ -117,18 +113,16 @@ func (c *Coordinator) checkLiveness() {
 
 func (c *Coordinator) killWorker(deadWorkerId int) {
 	c.workerDead[deadWorkerId] = true
-	for i, workerId := range c.completedMapTasks {
-		if workerId == deadWorkerId {
-			delete(c.completedMapTasks, i)
-		}
-	}
+	delete(c.workerHeartbeats, deadWorkerId)
 	for i, workerId := range c.mapTasks {
-		if workerId == deadWorkerId {
+		_, complete := c.completedMapTasks[i]
+		if !complete && workerId == deadWorkerId {
 			delete(c.mapTasks, i)
 		}
 	}
 	for i, workerId := range c.reduceTasks {
-		if workerId == deadWorkerId {
+		_, complete := c.completedReduceTasks[i]
+		if !complete && workerId == deadWorkerId {
 			delete(c.reduceTasks, i)
 		}
 	}
@@ -158,8 +152,7 @@ func (c *Coordinator) Done() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	reduce := len(c.completedReduceTasks)
-	// mapcount := len(c.completedMapTasks)
-	// fmt.Printf("Map: %v tasks out of %v\n", mapcount, c.job.NMap)
+	// fmt.Printf("Map: %v tasks out of %v\n", len(c.completedMapTasks), c.job.NMap)
 	// fmt.Printf("Reduce: %v tasks out of %v\n", reduce, c.job.NReduce)
 	return reduce == c.job.NReduce
 }
