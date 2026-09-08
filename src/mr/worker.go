@@ -176,12 +176,6 @@ func registerWorker(mapf MapF, reducef ReduceF) (worker, error) {
 	w.workerId = reply.WorkerId
 	w.mapf = mapf
 	w.reducef = reducef
-	go func() {
-		for {
-			heartbeat(w.workerId)
-			time.Sleep(time.Second)
-		}
-	}()
 	return w, nil
 }
 
@@ -209,21 +203,10 @@ func completeTask(workerId int, kind TaskKind, taskId int) (CompleteTaskReply, e
 	return reply, nil
 }
 
-func heartbeat(workerId int) error {
-	args := HeartbeatArgs{}
-	reply := HeartbeatReply{}
-	args.WorkerId = workerId
-	ok := call("Coordinator.Heartbeat", &args, &reply)
-	if !ok {
-		return errors.New("Heartbeat failed")
-	}
-	return nil
-}
-
 // send an RPC request to the coordinator, wait for the response.
 // usually returns true.
 // returns false if something goes wrong.
-func call(rpcname string, args interface{}, reply interface{}) bool {
+func call(rpcname string, args any, reply any) bool {
 	// c, err := rpc.DialHTTP("tcp", "127.0.0.1"+":1234")
 	c, err := rpc.DialHTTP("unix", coordSockName)
 	if err != nil {

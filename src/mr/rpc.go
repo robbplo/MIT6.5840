@@ -54,8 +54,3 @@ type CompleteTaskArgs struct {
 }
 
 type CompleteTaskReply struct{}
-
-type HeartbeatArgs struct {
-	WorkerId int
-}
-type HeartbeatReply struct { }

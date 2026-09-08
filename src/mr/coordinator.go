@@ -11,27 +11,34 @@ import (
 	"time"
 )
 
-type Coordinator struct {
-	// Your definitions here.
-	job                  JobInfo
-	filesToMap           []string
-	mapTasks             map[int]int
-	reduceTasks          map[int]int
-	completedMapTasks    map[int]int
-	completedReduceTasks map[int]int
-	workerCounter        int
-	workerHeartbeats     map[int]time.Time
-	workerDead           map[int]bool
-	mu                   sync.Mutex
+var taskTimeout = 10 * time.Second
+
+type mapTask struct {
+	filepath    string
+	workerId    *int
+	completedBy *int
+	timeout     time.Time
 }
 
-// Your code here -- RPC handlers for the worker to call.
+type reduceTask struct {
+	workerId    *int
+	completedBy *int
+	timeout     time.Time
+}
+
+type Coordinator struct {
+	job           JobInfo
+	mapTasks      []mapTask
+	reduceTasks   []reduceTask
+	workerCounter int
+	mu            sync.Mutex
+}
+
 func (c *Coordinator) RegisterWorker(args *RegisterWorkerArgs, reply *RegisterWorkerReply) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	reply.Job = c.job
 	reply.WorkerId = c.workerCounter
-	c.workerHeartbeats[c.workerCounter] = time.Now()
 	c.workerCounter++
 	return nil
 }
@@ -39,17 +46,14 @@ func (c *Coordinator) RegisterWorker(args *RegisterWorkerArgs, reply *RegisterWo
 func (c *Coordinator) GetTask(args *GetTaskArgs, reply *GetTaskReply) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.workerDead[args.WorkerId] {
-		reply.Kind = TaskExit
-		return nil
-	}
-	for i := 0; i < len(c.filesToMap); i++ {
-		_, ok := c.mapTasks[i]
-		if !ok {
-			c.mapTasks[i] = args.WorkerId
+	for id := range c.mapTasks {
+		task := &c.mapTasks[id]
+		if task.workerId == nil {
+			task.workerId = &args.WorkerId
+			task.timeout = time.Now().Add(taskTimeout)
 			reply.Kind = TaskMap
-			reply.Map.Filename = c.filesToMap[i]
-			reply.Map.TaskId = i
+			reply.Map.Filename = task.filepath
+			reply.Map.TaskId = id
 			return nil
 		}
 	}
@@ -64,66 +68,68 @@ func (c *Coordinator) CompleteTask(args *CompleteTaskArgs, reply *CompleteTaskRe
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if args.Kind == TaskMap {
-		c.completedMapTasks[args.TaskId] = args.WorkerId
+		c.mapTasks[args.TaskId].completedBy = &args.WorkerId
 		return nil
 	}
 	if args.Kind == TaskReduce {
-		c.completedReduceTasks[args.TaskId] = args.WorkerId
+		c.reduceTasks[args.TaskId].completedBy = &args.WorkerId
 		return nil
 	}
 	return errors.New("Invalid task kind")
 }
 
-func (c *Coordinator) Heartbeat(args *HeartbeatArgs, reply *HeartbeatReply) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.workerHeartbeats[args.WorkerId] = time.Now()
-
-	return nil
-}
-
 func (c *Coordinator) getReduceTask(args *GetTaskArgs) (TaskKind, ReduceTask) {
-	if len(c.completedMapTasks) != c.job.NMap {
+	if !c.allMapTasksDone() {
 		return TaskWait, ReduceTask{}
 	}
-	for i := 0; i < c.job.NReduce; i++ {
-		_, ok := c.reduceTasks[i]
-		if !ok {
-			c.reduceTasks[i] = args.WorkerId
-			taskId := i
-			return TaskReduce, ReduceTask{TaskId: taskId}
+	for id := range c.reduceTasks {
+		task := &c.reduceTasks[id]
+		if task.workerId == nil {
+			task.workerId = &args.WorkerId
+			task.timeout = time.Now().Add(taskTimeout)
+			return TaskReduce, ReduceTask{TaskId: id}
 		}
 	}
-	if len(c.completedReduceTasks) == c.job.NReduce {
+	if c.allReduceTasksDone() {
 		return TaskExit, ReduceTask{}
 	}
 	return TaskWait, ReduceTask{}
 }
 
-func (c *Coordinator) checkLiveness() {
+func (c *Coordinator) allMapTasksDone() bool {
+	i := 0
+	for _, task := range c.mapTasks {
+		if task.completedBy != nil {
+			i++
+		}
+	}
+	return i == c.job.NMap
+}
+
+func (c *Coordinator) allReduceTasksDone() bool {
+	i := 0
+	for _, task := range c.reduceTasks {
+		if task.completedBy != nil {
+			i++
+		}
+	}
+	return i == c.job.NReduce
+}
+
+func (c *Coordinator) freeExpiredTasks() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	now := time.Now()
-	for workerId, timestamp := range c.workerHeartbeats {
-		if now.After(timestamp.Add(time.Second * 10)) {
-			c.killWorker(workerId)
+	for id := range c.mapTasks {
+		task := &c.mapTasks[id]
+		if task.completedBy == nil && now.After(task.timeout) {
+			task.workerId = nil
 		}
 	}
-}
-
-func (c *Coordinator) killWorker(deadWorkerId int) {
-	c.workerDead[deadWorkerId] = true
-	delete(c.workerHeartbeats, deadWorkerId)
-	for i, workerId := range c.mapTasks {
-		_, complete := c.completedMapTasks[i]
-		if !complete && workerId == deadWorkerId {
-			delete(c.mapTasks, i)
-		}
-	}
-	for i, workerId := range c.reduceTasks {
-		_, complete := c.completedReduceTasks[i]
-		if !complete && workerId == deadWorkerId {
-			delete(c.reduceTasks, i)
+	for id := range c.reduceTasks {
+		task := &c.reduceTasks[id]
+		if task.completedBy == nil && now.After(task.timeout) {
+			task.workerId = nil
 		}
 	}
 }
@@ -140,7 +146,7 @@ func (c *Coordinator) server(sockname string) {
 	go http.Serve(l, nil)
 	go func() {
 		for {
-			c.checkLiveness()
+			c.freeExpiredTasks()
 			time.Sleep(time.Second)
 		}
 	}()
@@ -151,10 +157,7 @@ func (c *Coordinator) server(sockname string) {
 func (c *Coordinator) Done() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	reduce := len(c.completedReduceTasks)
-	// fmt.Printf("Map: %v tasks out of %v\n", len(c.completedMapTasks), c.job.NMap)
-	// fmt.Printf("Reduce: %v tasks out of %v\n", reduce, c.job.NReduce)
-	return reduce == c.job.NReduce
+	return c.allReduceTasksDone()
 }
 
 // create a Coordinator.
@@ -164,14 +167,12 @@ func MakeCoordinator(sockname string, files []string, nReduce int) *Coordinator 
 	c := Coordinator{}
 	c.job.NMap = len(files)
 	c.job.NReduce = nReduce
-	c.filesToMap = files
 	c.workerCounter = 0
-	c.mapTasks = map[int]int{}
-	c.reduceTasks = map[int]int{}
-	c.completedMapTasks = map[int]int{}
-	c.completedReduceTasks = map[int]int{}
-	c.workerHeartbeats = map[int]time.Time{}
-	c.workerDead = map[int]bool{}
+	c.mapTasks = make([]mapTask, len(files))
+	for i, file := range files {
+		c.mapTasks[i].filepath = file
+	}
+	c.reduceTasks = make([]reduceTask, nReduce)
 	c.server(sockname)
 	return &c
 }
