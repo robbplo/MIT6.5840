@@ -1,7 +1,6 @@
 package lock
 
 import (
-	"sync"
 	"time"
 
 	"6.5840/kvsrv1/rpc"
@@ -14,7 +13,6 @@ type Lock struct {
 	// Put and Get.  The tester passes the clerk in when calling
 	// MakeLock().
 	ck         kvtest.IKVClerk
-	mu         sync.Mutex
 	name       string
 	identifier string
 }
