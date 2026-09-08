@@ -196,11 +196,14 @@ Checksums are stored on disk and in memory
 On read, checksum is verified against the stored version
 On mismatch, error is returned to client and failure reported to master
 
+## Question
+Describe a sequence of events that would result in a client reading stale data from the Google File System.
 
-
-
-
-
-Stale read may occur when a chunk location is cached and a write failed to replicate to it.
-
+## Answer
+1. Client A requests a read from chunk *C*.
+2. The master gives the chunk handle and replicas *r1, r2*. Client A caches this
+3. *r1* goes down
+4. Client B mutates *C*. A new lease is granted, and version number incremented.
+5. *r1* comes back up, with the old version number.
+6. Client A reads chunk *C* from *r1* because of cached metadata, resulting in a stale read
 
