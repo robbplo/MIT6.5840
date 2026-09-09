@@ -133,5 +133,12 @@ Once a value is chosen, every higher-numbered proposal must have that same value
   accepted, A thinks that "X" has been chosen. However, A crashes before sending an accept to B.
 - B sends prepare messages with proposal number 2, and gets positive responses from B and C.
   The response from C says that (1, "X") was previously accepted.
-- B finds that the higher-numbered accepted proposal has the value "X".
+- B finds that the highest-numbered accepted proposal has the value "X".
   B sends accept(2, "X") to B and C and gets positive responses from both, so "X" is chosen.
+
+Before A can send the *accept*, it must receive positive response from a majority of acceptors.
+Then, once it starts to send *accept* requests, if a majority respond with success, the value is
+chosen. When B starts its own proposal, it may choose a different majority of acceptors to address.
+If a value was chosen, this new majority is guaranteed to contain an acceptor which contains the
+chosen value. Even if the value was not chosen, B will still use the highest-numbered accepted value
+found in its set of acceptors. 
