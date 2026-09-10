@@ -87,6 +87,8 @@ If stack allocation can be unsafe, heap is chosen. E.g.:
 - Closure which passes variable to a goroutine
 - When value is stored in a container which outlives function
 
+Compiler can tell you which values escape to the heap: 
+`go build -gcflags="-m"` or the more verbose `-m -m`
 
 ## Question
 What do you like best about Go? Why?
