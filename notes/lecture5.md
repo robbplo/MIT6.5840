@@ -88,6 +88,6 @@ Just a nice example using goroutines, channels, mutexes all together. No differe
 
 ## Takeaways
 Some great examples of channel usage in intuitive or clever ways.
-In the PubSub example with channels, the similarity with GenServer was eye opening.
+In the PubSub example with channels, the similarity with GenServer/Actor model was eye opening.
 "Share memory by communicating" with channels provides a simple mental model for concurency.
 
