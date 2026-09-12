@@ -6,11 +6,10 @@ import (
 	"6.5840/tester1"
 )
 
-
 type Clerk struct {
 	clnt    *tester.Clnt
 	servers []string
-	leader int // last successful leader (index into servers[])
+	leader  int // last successful leader (index into servers[])
 	// You can add to this struct.
 }
 

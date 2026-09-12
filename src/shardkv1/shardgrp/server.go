@@ -1,7 +1,6 @@
 package shardgrp
 
 import (
-
 	"6.5840/kvraft1/rsm"
 	"6.5840/kvsrv1/rpc"
 	"6.5840/labgob"
@@ -14,7 +13,6 @@ const (
 	ENVKEY = "65840ENV"
 )
 
-
 type KVServer struct {
 	me  int
 	rsm *rsm.RSM
@@ -23,12 +21,10 @@ type KVServer struct {
 	// Your code here
 }
 
-
 func (kv *KVServer) DoOp(req any) any {
 	// Your code here
 	return nil
 }
-
 
 func (kv *KVServer) Snapshot() []byte {
 	// Your code here

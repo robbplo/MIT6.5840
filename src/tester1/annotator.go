@@ -7,16 +7,16 @@ import (
 	"6.5840/tester1/sockrpc"
 )
 
-/// Global variable initialized in `daemonsrv.go`.
+// / Global variable initialized in `daemonsrv.go`.
 var rpcc *sockrpc.RPCClnt
 
 /// Annotator interface. The naming of Annotate is not consistent with others, but is shorter which
 /// is good from the user perspective.
 
 func Annotate(tag, desp, details string) {
-	args := &PostAnnotatorPointArgs {
-		Tag: tag,
-		Desp: desp,
+	args := &PostAnnotatorPointArgs{
+		Tag:     tag,
+		Desp:    desp,
 		Details: details,
 	}
 	var reply PostAnnotatorPointReply
@@ -27,7 +27,7 @@ func Annotate(tag, desp, details string) {
 }
 
 func GetAnnotatorTimestamp() int64 {
-	args := &GetAnnotatorTimestampArgs { }
+	args := &GetAnnotatorTimestampArgs{}
 	var reply GetAnnotatorTimestampReply
 	ok := rpcc.RPCMarshall("TesterRPC.GetAnnotatorTimestamp", args, &reply)
 	if !ok {
@@ -38,9 +38,9 @@ func GetAnnotatorTimestamp() int64 {
 }
 
 func PostAnnotatorInfoInterval(start int64, desp, details string) {
-	args := &PostAnnotatorInfoIntervalArgs {
-		Start: start,
-		Desp: desp,
+	args := &PostAnnotatorInfoIntervalArgs{
+		Start:   start,
+		Desp:    desp,
 		Details: details,
 	}
 	var reply PostAnnotatorInfoIntervalReply
@@ -58,7 +58,7 @@ type PostAnnotatorPointArgs struct {
 	Details string
 }
 
-type PostAnnotatorPointReply struct { }
+type PostAnnotatorPointReply struct{}
 
 func (trpc *TesterRPC) PostAnnotatorPoint(
 	args *PostAnnotatorPointArgs,
@@ -69,7 +69,7 @@ func (trpc *TesterRPC) PostAnnotatorPoint(
 
 /// GetAnnotatorTimestamp RPC definitions.
 
-type GetAnnotatorTimestampArgs struct { }
+type GetAnnotatorTimestampArgs struct{}
 
 type GetAnnotatorTimestampReply struct {
 	Timestamp int64
@@ -90,7 +90,7 @@ type PostAnnotatorInfoIntervalArgs struct {
 	Details string
 }
 
-type PostAnnotatorInfoIntervalReply struct { }
+type PostAnnotatorInfoIntervalReply struct{}
 
 func (trpc *TesterRPC) PostAnnotatorInfoInterval(
 	args *PostAnnotatorInfoIntervalArgs,

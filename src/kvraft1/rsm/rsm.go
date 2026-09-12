@@ -8,7 +8,6 @@ import (
 	"6.5840/raft1"
 	"6.5840/raftapi"
 	"6.5840/tester1"
-
 )
 
 type Op struct {
@@ -16,7 +15,6 @@ type Op struct {
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
 }
-
 
 // A server (i.e., ../server.go) that wants to replicate itself calls
 // MakeRSM and must implement the StateMachine interface.  This
@@ -71,7 +69,6 @@ func MakeRSM(servers []*labrpc.ClientEnd, me int, persister *tester.Persister, m
 func (rsm *RSM) Raft() raftapi.Raft {
 	return rsm.rf
 }
-
 
 // Submit a command to Raft, and wait for it to be committed.  It
 // should return ErrWrongLeader if client should find new leader and

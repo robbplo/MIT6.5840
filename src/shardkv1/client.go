@@ -20,7 +20,7 @@ import (
 type Clerk struct {
 	clnt *tester.Clnt
 	sck  *shardctrler.ShardCtrler
-	rcks   map[tester.Tgid]*shardgrp.Clerk
+	rcks map[tester.Tgid]*shardgrp.Clerk
 	// You will have to modify this struct.
 }
 
@@ -40,7 +40,6 @@ func (ck *Clerk) GetClerk(gid tester.Tgid) (*shardgrp.Clerk, bool) {
 	rck, ok := ck.rcks[gid]
 	return rck, ok
 }
-
 
 // Get a key from a shardgrp.  You can use shardcfg.Key2Shard(key) to
 // find the shard responsible for the key and ck.sck.Query() to read

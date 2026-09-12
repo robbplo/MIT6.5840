@@ -1,7 +1,6 @@
 package shardgrp
 
 import (
-
 	"6.5840/kvsrv1/rpc"
 	"6.5840/shardkv1/shardcfg"
 	"6.5840/tester1"
@@ -10,7 +9,7 @@ import (
 type Clerk struct {
 	*tester.Clnt
 	servers []string
-	leader int // last successful leader (index into servers[])
+	leader  int // last successful leader (index into servers[])
 	// You can  add to this struct.
 }
 
