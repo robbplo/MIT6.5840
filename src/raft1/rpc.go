@@ -6,6 +6,9 @@ import (
 	"6.5840/labrpc"
 )
 
+const rpcRetryDelay = 10 * time.Millisecond
+const rpcRetries = 2
+
 type AppendEntriesArgs struct {
 	Term         int
 	LeaderId     int

@@ -12,6 +12,7 @@ import (
 
 	"fmt"
 	"math/rand"
+	"os"
 	"time"
 
 	//	"6.5840/labgob"
@@ -20,10 +21,7 @@ import (
 	tester "6.5840/tester1"
 )
 
-const debug = true
 const heartbeatInterval = 50 * time.Millisecond
-const rpcRetryDelay = 10 * time.Millisecond
-const rpcRetries = 2
 
 type role uint8
 
@@ -202,11 +200,11 @@ func (rf *Raft) becomeFollower() {
 }
 
 func (rf *Raft) becomeCandidate() {
-	rf.debugPrint("became candidate")
 	rf.role = candidate
 	rf.currentTerm++
 	rf.votedFor = &rf.me
 	rf.electionVotes = 1
+	rf.debugPrint("became candidate")
 	rf.requestAllVotes()
 }
 
@@ -381,19 +379,26 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	return rf
 }
 
+var debugTime time.Time
+
 func (rf *Raft) debugPrint(format string, a ...any) {
+	if debugTime.IsZero() {
+		debugTime = time.Now()
+	}
+	_, debug := os.LookupEnv("RAFT_DEBUG")
 	if !debug {
 		return
 	}
-	role := "follower"
+	role := "follower "
 	switch rf.role {
 	case leader:
-		role = "leader"
+		role = "leader   "
 	case candidate:
 		role = "candidate"
 	}
 
-	part1 := fmt.Sprintf("%v\t [%v]: ", role, rf.me)
+	elapsedTime := time.Since(debugTime).Milliseconds()
+	part1 := fmt.Sprintf("%v\t%v\tid:%v term:%v\t", elapsedTime, role, rf.me, rf.currentTerm)
 	part2 := fmt.Sprintf(format, a...)
 	fmt.Print(part1 + part2 + "\n")
 }
