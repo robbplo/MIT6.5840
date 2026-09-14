@@ -1,0 +1,3 @@
+- actor pattern seems like a lot of extra effort
+- forgetting to initialize channels is a silly mistake
+- channels seem to be difficult to debug
