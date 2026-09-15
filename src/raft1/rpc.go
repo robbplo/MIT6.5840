@@ -25,19 +25,23 @@ type AppendEntriesReply struct {
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	r := make(chan *AppendEntriesReply)
-	rf.appendRequests <- appendReq{args: *args, reply: r}
+	rf.appendRequests <- appendRequest{args: *args, reply: r}
 	*reply = *<-r
 }
 
-func (rf *Raft) callAppendEntries(server *labrpc.ClientEnd, args *AppendEntriesArgs) {
+func (rf *Raft) callAppendEntries(serverId int, args *AppendEntriesArgs) {
 	go func() {
 		ok := false
 		attempts := 0
 		for !ok && attempts <= rpcRetries {
 			reply := AppendEntriesReply{}
-			ok = server.Call("Raft.AppendEntries", args, &reply)
+			ok = rf.peers[serverId].Call("Raft.AppendEntries", args, &reply)
 			if ok {
-				rf.appendReplies <- reply
+				rf.appendReplies <- appendReply{
+					serverId: serverId,
+					args:     *args,
+					reply:    reply,
+				}
 				return
 			}
 			time.Sleep(rpcRetryDelay)
