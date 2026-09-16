@@ -142,7 +142,7 @@ func (rf *Raft) actorLoop() {
 			rf.handleAppendReply(rep)
 		case <-rf.heartbeatTicker.C:
 			if rf.role == leader {
-				rf.sendHeartbeats()
+				rf.sendAllAppendRequests()
 			}
 		// candidate
 		case rep := <-rf.voteReplies:
@@ -185,10 +185,8 @@ func (rf *Raft) handleStartRequest(req startReq) {
 
 func (rf *Raft) handleAppendReply(r appendReply) {
 	if r.reply.Term > rf.currentTerm {
+		rf.debugPrint("append reply came from new leader")
 		rf.becomeFollower()
-		return
-	}
-	if len(r.args.Entries) == 0 {
 		return
 	}
 	if r.reply.Success {
@@ -196,7 +194,6 @@ func (rf *Raft) handleAppendReply(r appendReply) {
 		lastIndex := r.args.PrevLogIndex + newLogs
 		rf.nextIndex[r.serverId] = lastIndex + 1
 		rf.matchIndex[r.serverId] = lastIndex
-		rf.debugPrint("server replicated: %v", r.serverId)
 
 		// check if new commit
 		rf.matchIndex[rf.me] = len(rf.log)
@@ -204,23 +201,12 @@ func (rf *Raft) handleAppendReply(r appendReply) {
 		matches := make([]int, len(rf.matchIndex))
 		copy(matches, rf.matchIndex)
 		slices.Sort(matches)
-		rf.debugPrint("matches %v", matches)
 		N := matches[majority-1]
 		if N > rf.commitIndex {
 			rf.commitAndApply(N)
 		}
-
-		// sort matchIndex
-		// take largest majority
-		// take lowest N
-		// if match > commitIndex: commitIndex = n
-
-		// If some `N > commitIndex` has a majority of `matchIndex[i] ≥ N`
-		// and `log[N].term == currentTerm`: set `commitIndex = N` (§5.3, §5.4)
-
 		return
 	}
-	rf.debugPrint("follower reported inconsistency")
 	rf.nextIndex[r.serverId]--
 	rf.sendOneAppendRequest(r.serverId)
 }
@@ -233,28 +219,38 @@ func (rf *Raft) handleAppendRequest(req appendRequest) {
 	reply.Success = false
 	// request came from old leader, reject
 	if args.Term < rf.currentTerm {
+		rf.debugPrint("rejecting append from old leader")
 		return
 	}
 	rf.resetElectionTimer()
 	// request came from new leader, update
-	if args.Term > rf.currentTerm {
+	if rf.leaderId == nil || *rf.leaderId != args.LeaderId {
 		rf.setCurrentTerm(args.Term)
 		rf.leaderId = &args.LeaderId
 		rf.becomeFollower()
 	}
 
-	// log inconsistency
+	// log inconsistency checks
+	prevLogTerm := -1
 	lastLogIndex := len(rf.log) - 1
-	// TODO: fix conditional
-	if args.PrevLogIndex <= lastLogIndex && args.PrevLogTerm != rf.log[args.PrevLogIndex].Term {
+	if args.PrevLogIndex <= lastLogIndex {
+		prevLogTerm = rf.log[args.PrevLogIndex].Term
+	}
+	if prevLogTerm == -1 {
+		rf.debugPrint("prev log %v not found, requesting more", args.PrevLogIndex)
+		req.reply <- &reply
+		return
+	}
+	if prevLogTerm != args.PrevLogTerm {
 		rf.debugPrint(
-			"log inconsistency, [args index:%v term:%v] [log index:%v term:%v]",
+			"log inconsistency, [args index:%v term:%v] [rf.log index:%v term:%v]",
 			args.PrevLogIndex,
 			args.PrevLogTerm,
 			lastLogIndex,
-			rf.log[args.PrevLogIndex].Term,
+			prevLogTerm,
 		)
 		rf.log = rf.log[:args.PrevLogIndex-1]
+		req.reply <- &reply
 		return
 	}
 
@@ -321,7 +317,8 @@ func (rf *Raft) becomeLeader() {
 	rf.matchIndex = make([]int, len(rf.peers))
 	rf.heartbeatTicker.Reset(heartbeatInterval)
 	rf.role = leader
-	rf.sendHeartbeats()
+	rf.sendAllAppendRequests()
+	// rf.sendHeartbeats()
 }
 
 func (rf *Raft) sendAllAppendRequests() {
@@ -459,8 +456,6 @@ func (rf *Raft) commitAndApply(newCommitIndex int) {
 	// skip dummy log at index 0
 	startIndex := max(rf.commitIndex, 1)
 	for i := startIndex; i <= newCommitIndex; i++ {
-		rf.debugPrint("applying log i:%v cmd:%v", i, rf.log[i].Command)
-
 		rf.applyCh <- raftapi.ApplyMsg{
 			CommandValid: true,
 			CommandIndex: i,
@@ -513,8 +508,8 @@ func (rf *Raft) debugPrint(format string, a ...any) {
 	if debugTime.IsZero() {
 		debugTime = time.Now()
 	}
-	_, debug := os.LookupEnv("RAFT_DEBUG")
-	if !debug {
+	debug := os.Getenv("RAFT_DEBUG")
+	if debug != "true" {
 		return
 	}
 	role := "follower "
