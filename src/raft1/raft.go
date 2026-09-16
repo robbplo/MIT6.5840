@@ -176,7 +176,6 @@ func (rf *Raft) handleStartRequest(req startReq) {
 		rf.debugPrint("start command: %v", req.command)
 		rf.log = append(rf.log, entry{Command: req.command, Term: rf.currentTerm})
 		rf.sendAllAppendRequests()
-		rf.heartbeatTicker.Reset(heartbeatInterval)
 		req.reply <- startReply{isLeader: true, index: len(rf.log) - 1, term: rf.currentTerm}
 	} else {
 		req.reply <- startReply{isLeader: false, index: len(rf.log) - 1, term: rf.currentTerm}
@@ -254,9 +253,14 @@ func (rf *Raft) handleAppendRequest(req appendRequest) {
 		return
 	}
 
+	if lastLogIndex > args.PrevLogIndex {
+		rf.debugPrint("have more logs than leader, truncating until PrevLogIndex: %v", args.PrevLogIndex)
+		rf.log = rf.log[:args.PrevLogIndex+1]
+	}
+
 	reply.Success = true
 	if len(args.Entries) > 0 {
-		rf.debugPrint("appending %v logs", len(args.Entries))
+		rf.debugPrint("appending logs: %v", args.Entries)
 		rf.log = append(rf.log, args.Entries...)
 	}
 
@@ -309,16 +313,14 @@ func (rf *Raft) becomeCandidate() {
 }
 
 func (rf *Raft) becomeLeader() {
-	rf.debugPrint("became leader")
+	rf.debugPrint("became leader, log: %v", rf.log)
 	rf.nextIndex = make([]int, len(rf.peers))
 	for i := range rf.peers {
 		rf.nextIndex[i] = len(rf.log)
 	}
 	rf.matchIndex = make([]int, len(rf.peers))
-	rf.heartbeatTicker.Reset(heartbeatInterval)
 	rf.role = leader
 	rf.sendAllAppendRequests()
-	// rf.sendHeartbeats()
 }
 
 func (rf *Raft) sendAllAppendRequests() {
@@ -341,24 +343,7 @@ func (rf *Raft) sendOneAppendRequest(id int) {
 		Entries:      rf.log[rf.nextIndex[id]:],
 		LeaderCommit: rf.commitIndex,
 	}
-	rf.callAppendEntries(id, &args)
-}
-
-func (rf *Raft) sendHeartbeats() {
-	for id := range rf.peers {
-		if id == rf.me {
-			continue
-		}
-		args := AppendEntriesArgs{
-			Term:         rf.currentTerm,
-			LeaderId:     rf.me,
-			PrevLogIndex: 0,
-			PrevLogTerm:  0,
-			Entries:      []entry{},
-			LeaderCommit: rf.commitIndex,
-		}
-		rf.callAppendEntries(id, &args)
-	}
+	rf.callAppendEntries(id, args)
 }
 
 func (rf *Raft) requestAllVotes() {
@@ -374,7 +359,7 @@ func (rf *Raft) requestAllVotes() {
 			LastLogIndex: lastLogIndex,
 			LastLogTerm:  lastLogTerm,
 		}
-		rf.callRequestVote(srv, &args)
+		rf.callRequestVote(srv, args)
 	}
 }
 
@@ -521,7 +506,7 @@ func (rf *Raft) debugPrint(format string, a ...any) {
 	}
 
 	elapsedTime := time.Since(debugTime).Milliseconds()
-	part1 := fmt.Sprintf("%v\t%v\tid:%v term:%v\t", elapsedTime, role, rf.me, rf.currentTerm)
+	part1 := fmt.Sprintf("%v\t%v\tid:%v term:%v lastLog:%v\t", elapsedTime, role, rf.me, rf.currentTerm, rf.log[len(rf.log)-1])
 	part2 := fmt.Sprintf(format, a...)
 	fmt.Print(part1 + part2 + "\n")
 }

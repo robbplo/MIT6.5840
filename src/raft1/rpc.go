@@ -29,7 +29,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	*reply = *<-r
 }
 
-func (rf *Raft) callAppendEntries(serverId int, args *AppendEntriesArgs) {
+func (rf *Raft) callAppendEntries(serverId int, args AppendEntriesArgs) {
 	go func() {
 		ok := false
 		attempts := 0
@@ -39,7 +39,7 @@ func (rf *Raft) callAppendEntries(serverId int, args *AppendEntriesArgs) {
 			if ok {
 				rf.appendReplies <- appendReply{
 					serverId: serverId,
-					args:     *args,
+					args:     args,
 					reply:    reply,
 				}
 				return
@@ -67,7 +67,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	*reply = *<-r
 }
 
-func (rf *Raft) callRequestVote(server *labrpc.ClientEnd, args *RequestVoteArgs) {
+func (rf *Raft) callRequestVote(server *labrpc.ClientEnd, args RequestVoteArgs) {
 	go func() {
 		ok := false
 		attempts := 0
