@@ -8,15 +8,13 @@ package raft
 // raft interface.
 
 import (
-	//	"bytes"
-
 	"fmt"
 	"math/rand"
 	"os"
 	"slices"
+	"strconv"
 	"time"
 
-	//	"6.5840/labgob"
 	"6.5840/labrpc"
 	"6.5840/raftapi"
 	tester "6.5840/tester1"
@@ -54,9 +52,8 @@ type Raft struct {
 	nextIndex  []int // per server, next entry to send (init leader last log index + 1)
 	matchIndex []int // per server, highest entry known replicated (init 0, monotonic)
 
-	role     role
-	applyCh  chan raftapi.ApplyMsg // apply a message to the state machine
-	leaderId *int                  // currently known leader, for client redirect
+	role    role
+	applyCh chan raftapi.ApplyMsg // apply a message to the state machine
 
 	electionVotes int
 	electionTerm  int
@@ -72,7 +69,7 @@ type Raft struct {
 	appendReplies  chan appendReply
 
 	voteRequests chan voteReq
-	voteReplies  chan RequestVoteReply
+	voteReplies  chan voteReply
 }
 
 type startReply struct {
@@ -111,6 +108,11 @@ type voteReq struct {
 	reply chan *RequestVoteReply
 }
 
+
+type voteReply struct {
+	args RequestVoteArgs
+	reply RequestVoteReply
+}
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
 // server isn't the leader, returns false. otherwise start the
@@ -130,6 +132,10 @@ func (rf *Raft) Start(command any) (int, int, bool) {
 	return reply.index, reply.term, reply.isLeader
 }
 
+// Possible causes of current inconsistency in Backup 3B test
+// Log replication step has incorrect handling of inconsistent logs
+// A leader is elected who should not be (section 5.4)
+
 func (rf *Raft) actorLoop() {
 	majority := (len(rf.peers) + 1) / 2
 
@@ -145,12 +151,16 @@ func (rf *Raft) actorLoop() {
 				rf.sendAllAppendRequests()
 			}
 		// candidate
-		case rep := <-rf.voteReplies:
+		case r := <-rf.voteReplies:
 			if rf.role == candidate {
-				if rf.currentTerm >= rep.Term && rep.VoteGranted {
+				if r.args.Term != rf.currentTerm {
+					break
+				}
+				if rf.currentTerm >= r.reply.Term && r.reply.VoteGranted {
 					rf.electionVotes++
 				}
 				if rf.electionVotes >= majority {
+					rf.debugPrint("got %v votes out of %v", rf.electionVotes, majority)
 					rf.becomeLeader()
 				}
 			}
@@ -173,7 +183,7 @@ func (rf *Raft) actorLoop() {
 
 func (rf *Raft) handleStartRequest(req startReq) {
 	if rf.role == leader {
-		rf.debugPrint("start command: %v", req.command)
+		rf.debugPrint("start command: %v nextIndex: %v", req.command, rf.nextIndex)
 		rf.log = append(rf.log, entry{Command: req.command, Term: rf.currentTerm})
 		rf.sendAllAppendRequests()
 		req.reply <- startReply{isLeader: true, index: len(rf.log) - 1, term: rf.currentTerm}
@@ -189,8 +199,7 @@ func (rf *Raft) handleAppendReply(r appendReply) {
 		return
 	}
 	if r.reply.Success {
-		newLogs := len(r.args.Entries)
-		lastIndex := r.args.PrevLogIndex + newLogs
+		lastIndex := r.args.PrevLogIndex + len(r.args.Entries)
 		rf.nextIndex[r.serverId] = lastIndex + 1
 		rf.matchIndex[r.serverId] = lastIndex
 
@@ -206,7 +215,21 @@ func (rf *Raft) handleAppendReply(r appendReply) {
 		}
 		return
 	}
-	rf.nextIndex[r.serverId]--
+	if r.reply.ConflictTerm == 0 {
+		rf.nextIndex[r.serverId] = r.reply.LogLen
+	} else {
+		termStartIndex := -1
+		for i, log := range rf.log {
+			if log.Term == r.reply.ConflictTerm {
+				termStartIndex = i
+			}
+		}
+		if termStartIndex == -1 {
+			rf.nextIndex[r.serverId] = r.reply.ConflictIndex
+		} else {
+			rf.nextIndex[r.serverId] = termStartIndex
+		}
+	}
 	rf.sendOneAppendRequest(r.serverId)
 }
 
@@ -216,30 +239,27 @@ func (rf *Raft) handleAppendRequest(req appendRequest) {
 
 	reply.Term = rf.currentTerm
 	reply.Success = false
+	reply.LogLen = len(rf.log)
 	// request came from old leader, reject
 	if args.Term < rf.currentTerm {
-		rf.debugPrint("rejecting append from old leader")
+		rf.debugPrint("rejecting append from term %v", args.Term)
 		return
 	}
 	rf.resetElectionTimer()
 	// request came from new leader, update
-	if rf.leaderId == nil || *rf.leaderId != args.LeaderId {
+	if args.Term > rf.currentTerm {
 		rf.setCurrentTerm(args.Term)
-		rf.leaderId = &args.LeaderId
 		rf.becomeFollower()
 	}
 
 	// log inconsistency checks
-	prevLogTerm := -1
 	lastLogIndex := len(rf.log) - 1
-	if args.PrevLogIndex <= lastLogIndex {
-		prevLogTerm = rf.log[args.PrevLogIndex].Term
-	}
-	if prevLogTerm == -1 {
+	if args.PrevLogIndex > lastLogIndex {
 		rf.debugPrint("prev log %v not found, requesting more", args.PrevLogIndex)
 		req.reply <- &reply
 		return
 	}
+	prevLogTerm := rf.log[args.PrevLogIndex].Term
 	if prevLogTerm != args.PrevLogTerm {
 		rf.debugPrint(
 			"log inconsistency, [args index:%v term:%v] [rf.log index:%v term:%v]",
@@ -248,20 +268,27 @@ func (rf *Raft) handleAppendRequest(req appendRequest) {
 			lastLogIndex,
 			prevLogTerm,
 		)
-		rf.log = rf.log[:args.PrevLogIndex-1]
+		conflictIndex := args.PrevLogIndex
+		for conflictIndex > 0 && rf.log[conflictIndex].Term == prevLogTerm {
+			conflictIndex--
+		}
+		conflictIndex++
+		reply.ConflictTerm = prevLogTerm
+		reply.ConflictIndex = conflictIndex
+		rf.log = rf.log[:conflictIndex]
 		req.reply <- &reply
 		return
 	}
 
 	if lastLogIndex > args.PrevLogIndex {
-		rf.debugPrint("have more logs than leader, truncating until PrevLogIndex: %v", args.PrevLogIndex)
+		rf.debugPrint("have more logs than PrevLogIndex, truncating until: %v", args.PrevLogIndex)
 		rf.log = rf.log[:args.PrevLogIndex+1]
 	}
 
 	reply.Success = true
 	if len(args.Entries) > 0 {
-		rf.debugPrint("appending logs: %v", args.Entries)
 		rf.log = append(rf.log, args.Entries...)
+		rf.debugPrint("appended logs: %v", len(args.Entries))
 	}
 
 	if args.LeaderCommit > rf.commitIndex {
@@ -278,6 +305,7 @@ func (rf *Raft) handleVoteRequest(req voteReq) {
 	// request came from old leader, reject
 	if args.Term < rf.currentTerm {
 		rf.debugPrint("refused to vote for %v in term %v", args.CandidateId, args.Term)
+		req.reply <- &reply
 		return
 	}
 	// request came from new candidate
@@ -286,16 +314,25 @@ func (rf *Raft) handleVoteRequest(req voteReq) {
 		rf.becomeFollower()
 	}
 	if rf.votedFor != nil && *rf.votedFor != args.CandidateId {
+		req.reply <- &reply
 		return
 	}
 	// grant vote if candidate's log is at least as up-to-date as own log
 	lastLogIndex := len(rf.log) - 1
 	lastLogTerm := rf.log[lastLogIndex].Term
-	if args.LastLogTerm > lastLogTerm || args.LastLogIndex >= lastLogIndex {
-		rf.votedFor = &args.CandidateId
-		reply.VoteGranted = true
+	if lastLogTerm > args.LastLogTerm {
+		rf.debugPrint("refused to vote for %v, last log time mine: %v theirs: %v", args.CandidateId, lastLogTerm, args.LastLogTerm)
+		req.reply <- &reply
+		return
+	}
+	if lastLogTerm == args.LastLogTerm && lastLogIndex > args.LastLogIndex {
+		rf.debugPrint("refused to vote for %v, i have more logs in same term", args.CandidateId)
+		req.reply <- &reply
+		return
 	}
 	rf.debugPrint("voted for %v in term %v", args.CandidateId, args.Term)
+	rf.votedFor = &args.CandidateId
+	reply.VoteGranted = true
 	req.reply <- &reply
 }
 
@@ -313,7 +350,7 @@ func (rf *Raft) becomeCandidate() {
 }
 
 func (rf *Raft) becomeLeader() {
-	rf.debugPrint("became leader, log: %v", rf.log)
+	rf.debugPrint("became leader")
 	rf.nextIndex = make([]int, len(rf.peers))
 	for i := range rf.peers {
 		rf.nextIndex[i] = len(rf.log)
@@ -374,7 +411,7 @@ func (rf *Raft) GetState() (int, bool) {
 }
 
 func (rf *Raft) resetElectionTimer() {
-	electionTimeout := time.Duration(300+(rand.Int63()%300)) * time.Millisecond
+	electionTimeout := time.Duration(300+(rand.Int63()%200)) * time.Millisecond
 	rf.electionTimer.Reset(electionTimeout)
 }
 
@@ -437,7 +474,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 }
 
 func (rf *Raft) commitAndApply(newCommitIndex int) {
-	rf.debugPrint("committing until %v", newCommitIndex)
+	rf.debugPrint("committing until %v", rf.log[newCommitIndex])
 	// skip dummy log at index 0
 	startIndex := max(rf.commitIndex, 1)
 	for i := startIndex; i <= newCommitIndex; i++ {
@@ -472,12 +509,12 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.electionTimer = time.NewTimer(1 * time.Second)
 	rf.resetElectionTimer()
 
-	rf.startRequests = make(chan startReq)
+	rf.startRequests = make(chan startReq, 1)
 	rf.stateRequests = make(chan stateReq, 1)
 	rf.appendRequests = make(chan appendRequest, 1)
 	rf.appendReplies = make(chan appendReply, 1)
 	rf.voteRequests = make(chan voteReq, 1)
-	rf.voteReplies = make(chan RequestVoteReply, 1)
+	rf.voteReplies = make(chan voteReply, 1)
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
@@ -487,16 +524,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	return rf
 }
 
-var debugTime time.Time
+var debugTime time.Time = time.Now()
 
 func (rf *Raft) debugPrint(format string, a ...any) {
-	if debugTime.IsZero() {
-		debugTime = time.Now()
-	}
 	debug := os.Getenv("RAFT_DEBUG")
-	if debug != "true" {
-		return
-	}
 	role := "follower "
 	switch rf.role {
 	case leader:
@@ -505,8 +536,15 @@ func (rf *Raft) debugPrint(format string, a ...any) {
 		role = "candidate"
 	}
 
-	elapsedTime := time.Since(debugTime).Milliseconds()
-	part1 := fmt.Sprintf("%v\t%v\tid:%v term:%v lastLog:%v\t", elapsedTime, role, rf.me, rf.currentTerm, rf.log[len(rf.log)-1])
+	part1 := fmt.Sprintf("%v\tid:%v term:%v len:%v commit:%v last:%v\t\t", role, rf.me, rf.currentTerm, len(rf.log), rf.commitIndex, rf.log[len(rf.log)-1])
 	part2 := fmt.Sprintf(format, a...)
+	tester.Annotate(
+		"Server "+strconv.Itoa(rf.me),
+		part2,
+		role+part1,
+	)
+	if debug != "true" {
+		return
+	}
 	fmt.Print(part1 + part2 + "\n")
 }

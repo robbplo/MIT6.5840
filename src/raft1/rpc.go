@@ -19,8 +19,11 @@ type AppendEntriesArgs struct {
 }
 
 type AppendEntriesReply struct {
-	Term    int
-	Success bool
+	Term          int
+	Success       bool
+	LogLen        int // length of the follower's log
+	ConflictTerm  int // term where conflict occurred, 0 if no conflict
+	ConflictIndex int // index of the first entry with conflicting term
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -75,7 +78,7 @@ func (rf *Raft) callRequestVote(server *labrpc.ClientEnd, args RequestVoteArgs) 
 			reply := RequestVoteReply{}
 			ok = server.Call("Raft.RequestVote", args, &reply)
 			if ok {
-				rf.voteReplies <- reply
+				rf.voteReplies <- voteReply{args: args, reply: reply}
 				return
 			}
 			time.Sleep(rpcRetryDelay)
