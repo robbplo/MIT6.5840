@@ -108,11 +108,11 @@ type voteReq struct {
 	reply chan *RequestVoteReply
 }
 
-
 type voteReply struct {
-	args RequestVoteArgs
+	args  RequestVoteArgs
 	reply RequestVoteReply
 }
+
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
 // server isn't the leader, returns false. otherwise start the
@@ -243,6 +243,7 @@ func (rf *Raft) handleAppendRequest(req appendRequest) {
 	// request came from old leader, reject
 	if args.Term < rf.currentTerm {
 		rf.debugPrint("rejecting append from term %v", args.Term)
+		req.reply <- &reply
 		return
 	}
 	rf.resetElectionTimer()
