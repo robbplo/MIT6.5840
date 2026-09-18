@@ -37,6 +37,7 @@ func (rf *Raft) callAppendEntries(serverId int, args AppendEntriesArgs) {
 		ok := false
 		attempts := 0
 		for !ok && attempts <= rpcRetries {
+			attempts++
 			reply := AppendEntriesReply{}
 			ok = rf.peers[serverId].Call("Raft.AppendEntries", args, &reply)
 			if ok {
@@ -75,6 +76,7 @@ func (rf *Raft) callRequestVote(server *labrpc.ClientEnd, args RequestVoteArgs) 
 		ok := false
 		attempts := 0
 		for !ok && attempts <= rpcRetries {
+			attempts++
 			reply := RequestVoteReply{}
 			ok = server.Call("Raft.RequestVote", args, &reply)
 			if ok {
