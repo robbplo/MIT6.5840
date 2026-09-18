@@ -377,7 +377,7 @@ func (rf *Raft) sendOneAppendRequest(id int) {
 		LeaderId:     rf.me,
 		PrevLogIndex: nextIndex - 1,
 		PrevLogTerm:  rf.log[nextIndex-1].Term,
-		Entries:      rf.log[rf.nextIndex[id]:],
+		Entries:      slices.Clone(rf.log[rf.nextIndex[id]:]),
 		LeaderCommit: rf.commitIndex,
 	}
 	rf.callAppendEntries(id, args)
