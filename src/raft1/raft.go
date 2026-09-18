@@ -182,20 +182,24 @@ func (rf *Raft) actorLoop() {
 }
 
 func (rf *Raft) handleStartRequest(req startReq) {
-	if rf.role == leader {
-		rf.debugPrint("start command: %v nextIndex: %v", req.command, rf.nextIndex)
-		rf.log = append(rf.log, entry{Command: req.command, Term: rf.currentTerm})
-		rf.sendAllAppendRequests()
-		req.reply <- startReply{isLeader: true, index: len(rf.log) - 1, term: rf.currentTerm}
-	} else {
+	if rf.role != leader {
 		req.reply <- startReply{isLeader: false, index: len(rf.log) - 1, term: rf.currentTerm}
+		return
 	}
+	rf.debugPrint("start command: %v nextIndex: %v", req.command, rf.nextIndex)
+	rf.log = append(rf.log, entry{Command: req.command, Term: rf.currentTerm})
+	rf.sendAllAppendRequests()
+	req.reply <- startReply{isLeader: true, index: len(rf.log) - 1, term: rf.currentTerm}
 }
 
 func (rf *Raft) handleAppendReply(r appendReply) {
-	if r.reply.Term > rf.currentTerm {
-		rf.debugPrint("append reply came from new leader")
+	if r.reply.Term != rf.currentTerm {
+		rf.debugPrint("append reply from server in term %v", r.reply.Term)
 		rf.becomeFollower()
+		return
+	}
+	if r.args.Term != rf.currentTerm {
+		rf.debugPrint("append reply to request in term %v", r.args.Term)
 		return
 	}
 	if r.reply.Success {
