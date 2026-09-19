@@ -42,6 +42,7 @@ func (rf *Raft) callAppendEntries(serverId int, args AppendEntriesArgs) {
 			ok = rf.peers[serverId].Call("Raft.AppendEntries", args, &reply)
 			if ok {
 				rf.appendReplies <- appendReply{
+					ok:       true,
 					serverId: serverId,
 					args:     args,
 					reply:    reply,
@@ -49,6 +50,11 @@ func (rf *Raft) callAppendEntries(serverId int, args AppendEntriesArgs) {
 				return
 			}
 			time.Sleep(rpcRetryDelay)
+		}
+		rf.appendReplies <- appendReply{
+			ok: false,
+			serverId: serverId,
+			args: args,
 		}
 	}()
 }

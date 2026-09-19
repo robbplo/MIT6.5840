@@ -49,8 +49,9 @@ type Raft struct {
 	commitIndex int // highest entry known committed (init 0, monotonic)
 	lastApplied int // highest entry applied to the state machine (init 0, monotonic)
 
-	nextIndex  []int // per server, next entry to send (init leader last log index + 1)
-	matchIndex []int // per server, highest entry known replicated (init 0, monotonic)
+	nextIndex      []int // per server, next entry to send (init leader last log index + 1)
+	matchIndex     []int // per server, highest entry known replicated (init 0, monotonic)
+	appendInFlight []bool
 
 	role    role
 	applyCh chan raftapi.ApplyMsg // apply a message to the state machine
@@ -98,6 +99,7 @@ type appendRequest struct {
 }
 
 type appendReply struct {
+	ok       bool
 	serverId int
 	args     AppendEntriesArgs
 	reply    AppendEntriesReply
@@ -137,7 +139,6 @@ func (rf *Raft) Start(command any) (int, int, bool) {
 // A leader is elected who should not be (section 5.4)
 
 func (rf *Raft) actorLoop() {
-	majority := (len(rf.peers) + 1) / 2
 
 	for true {
 		select {
@@ -152,18 +153,7 @@ func (rf *Raft) actorLoop() {
 			}
 		// candidate
 		case r := <-rf.voteReplies:
-			if rf.role == candidate {
-				if r.args.Term != rf.currentTerm {
-					break
-				}
-				if rf.currentTerm >= r.reply.Term && r.reply.VoteGranted {
-					rf.electionVotes++
-				}
-				if rf.electionVotes >= majority {
-					rf.debugPrint("got %v votes out of %v", rf.electionVotes, majority)
-					rf.becomeLeader()
-				}
-			}
+			rf.handleVoteReply(r)
 		case <-rf.electionTimer.C:
 			if rf.role != leader {
 				rf.becomeCandidate()
@@ -193,13 +183,17 @@ func (rf *Raft) handleStartRequest(req startReq) {
 }
 
 func (rf *Raft) handleAppendReply(r appendReply) {
-	if r.reply.Term != rf.currentTerm {
-		rf.debugPrint("append reply from server in term %v", r.reply.Term)
-		rf.becomeFollower()
+	rf.appendInFlight[r.serverId] = false
+	if !r.ok {
+		return
+	}
+	if r.reply.Term > rf.currentTerm {
+		rf.debugPrint("append reply from server in later term %v", r.reply.Term)
+		rf.becomeFollower(r.reply.Term)
 		return
 	}
 	if r.args.Term != rf.currentTerm {
-		rf.debugPrint("append reply to request in term %v", r.args.Term)
+		rf.debugPrint("append reply from past term %v", r.args.Term)
 		return
 	}
 	if r.reply.Success {
@@ -253,8 +247,7 @@ func (rf *Raft) handleAppendRequest(req appendRequest) {
 	rf.resetElectionTimer()
 	// request came from new leader, update
 	if args.Term > rf.currentTerm {
-		rf.setCurrentTerm(args.Term)
-		rf.becomeFollower()
+		rf.becomeFollower(args.Term)
 	}
 
 	// log inconsistency checks
@@ -302,6 +295,26 @@ func (rf *Raft) handleAppendRequest(req appendRequest) {
 	req.reply <- &reply
 }
 
+func (rf *Raft) handleVoteReply(r voteReply) {
+	if r.reply.Term > rf.currentTerm {
+		rf.currentTerm = r.reply.Term
+		rf.debugPrint("vote reply from server in later term %v", r.reply.Term)
+		rf.becomeFollower(r.reply.Term)
+		return
+	}
+	if r.args.Term != rf.currentTerm {
+		rf.debugPrint("vote reply to from past term %v", r.args.Term)
+		return
+	}
+	if rf.currentTerm >= r.reply.Term && r.reply.VoteGranted {
+		rf.electionVotes++
+		majority := (len(rf.peers) + 1) / 2
+		if rf.electionVotes >= majority && rf.role != leader {
+			rf.becomeLeader()
+		}
+	}
+}
+
 func (rf *Raft) handleVoteRequest(req voteReq) {
 	args := req.args
 	reply := RequestVoteReply{}
@@ -315,8 +328,7 @@ func (rf *Raft) handleVoteRequest(req voteReq) {
 	}
 	// request came from new candidate
 	if args.Term > rf.currentTerm {
-		rf.setCurrentTerm(args.Term)
-		rf.becomeFollower()
+		rf.becomeFollower(args.Term)
 	}
 	if rf.votedFor != nil && *rf.votedFor != args.CandidateId {
 		req.reply <- &reply
@@ -326,12 +338,12 @@ func (rf *Raft) handleVoteRequest(req voteReq) {
 	lastLogIndex := len(rf.log) - 1
 	lastLogTerm := rf.log[lastLogIndex].Term
 	if lastLogTerm > args.LastLogTerm {
-		rf.debugPrint("refused to vote for %v, last log time mine: %v theirs: %v", args.CandidateId, lastLogTerm, args.LastLogTerm)
+		rf.debugPrint("refused to vote for %v: log term [mine: %v theirs: %v]", args.CandidateId, lastLogTerm, args.LastLogTerm)
 		req.reply <- &reply
 		return
 	}
 	if lastLogTerm == args.LastLogTerm && lastLogIndex > args.LastLogIndex {
-		rf.debugPrint("refused to vote for %v, i have more logs in same term", args.CandidateId)
+		rf.debugPrint("refused to vote for %v: log count [mine: %v theirs %v]", args.CandidateId, lastLogIndex, args.LastLogIndex)
 		req.reply <- &reply
 		return
 	}
@@ -341,7 +353,12 @@ func (rf *Raft) handleVoteRequest(req voteReq) {
 	req.reply <- &reply
 }
 
-func (rf *Raft) becomeFollower() {
+func (rf *Raft) becomeFollower(term int) {
+	if rf.role != follower {
+		rf.debugPrint("became follower")
+	}
+	rf.currentTerm = term
+	rf.votedFor = nil
 	rf.role = follower
 }
 
@@ -355,34 +372,39 @@ func (rf *Raft) becomeCandidate() {
 }
 
 func (rf *Raft) becomeLeader() {
-	rf.debugPrint("became leader")
-	rf.nextIndex = make([]int, len(rf.peers))
 	for i := range rf.peers {
 		rf.nextIndex[i] = len(rf.log)
+		rf.matchIndex[i] = 0
+		rf.appendInFlight[i] = false
 	}
-	rf.matchIndex = make([]int, len(rf.peers))
 	rf.role = leader
+	rf.debugPrint("became leader")
 	rf.sendAllAppendRequests()
 }
 
 func (rf *Raft) sendAllAppendRequests() {
 	rf.heartbeatTicker.Reset(heartbeatInterval)
 	for id := range rf.peers {
+		if id == rf.me {
+			continue
+		}
 		rf.sendOneAppendRequest(id)
 	}
 }
 
 func (rf *Raft) sendOneAppendRequest(id int) {
-	if id == rf.me {
+	inFlight := rf.appendInFlight[id]
+	if inFlight {
 		return
 	}
+	rf.appendInFlight[id] = true
 	nextIndex := rf.nextIndex[id]
 	args := AppendEntriesArgs{
 		Term:         rf.currentTerm,
 		LeaderId:     rf.me,
 		PrevLogIndex: nextIndex - 1,
 		PrevLogTerm:  rf.log[nextIndex-1].Term,
-		Entries:      slices.Clone(rf.log[rf.nextIndex[id]:]),
+		Entries:      slices.Clone(rf.log[nextIndex:]),
 		LeaderCommit: rf.commitIndex,
 	}
 	rf.callAppendEntries(id, args)
@@ -418,11 +440,6 @@ func (rf *Raft) GetState() (int, bool) {
 func (rf *Raft) resetElectionTimer() {
 	electionTimeout := time.Duration(300+(rand.Int63()%200)) * time.Millisecond
 	rf.electionTimer.Reset(electionTimeout)
-}
-
-func (rf *Raft) setCurrentTerm(term int) {
-	rf.currentTerm = term
-	rf.votedFor = nil
 }
 
 // save Raft's persistent state to stable storage,
@@ -509,6 +526,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 	rf.role = follower
 	rf.log = []entry{{Term: 0, Command: 0}}
+	rf.nextIndex = make([]int, len(rf.peers))
+	rf.matchIndex = make([]int, len(rf.peers))
+	rf.appendInFlight = make([]bool, len(rf.peers))
 	rf.applyCh = applyCh
 	rf.heartbeatTicker = time.NewTicker(heartbeatInterval)
 	rf.electionTimer = time.NewTimer(1 * time.Second)
