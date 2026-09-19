@@ -8,6 +8,7 @@ package raft
 // raft interface.
 
 import (
+	"bytes"
 	"fmt"
 	"math/rand"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"strconv"
 	"time"
 
+	"6.5840/labgob"
 	"6.5840/labrpc"
 	"6.5840/raftapi"
 	tester "6.5840/tester1"
@@ -45,7 +47,7 @@ type Raft struct {
 
 	// Persistent raft state
 	currentTerm int
-	votedFor    *int
+	votedFor    int
 	log         []entry
 
 	commitIndex int // highest entry known committed (init 0, monotonic)
@@ -180,6 +182,7 @@ func (rf *Raft) handleStartRequest(req startReq) {
 	}
 	rf.debugPrint("start command: %v nextIndex: %v", req.command, rf.nextIndex)
 	rf.log = append(rf.log, entry{Command: req.command, Term: rf.currentTerm})
+	rf.persist()
 	rf.sendAllAppendRequests()
 	req.reply <- startReply{isLeader: true, index: len(rf.log) - 1, term: rf.currentTerm}
 }
@@ -276,6 +279,7 @@ func (rf *Raft) handleAppendRequest(req appendRequest) {
 		reply.ConflictTerm = prevLogTerm
 		reply.ConflictIndex = conflictIndex
 		rf.log = rf.log[:conflictIndex]
+		rf.persist()
 		req.reply <- &reply
 		return
 	}
@@ -288,6 +292,7 @@ func (rf *Raft) handleAppendRequest(req appendRequest) {
 	reply.Success = true
 	if len(args.Entries) > 0 {
 		rf.log = append(rf.log, args.Entries...)
+		rf.persist()
 		rf.debugPrint("appended logs: %v", len(args.Entries))
 	}
 
@@ -332,7 +337,7 @@ func (rf *Raft) handleVoteRequest(req voteReq) {
 	if args.Term > rf.currentTerm {
 		rf.becomeFollower(args.Term)
 	}
-	if rf.votedFor != nil && *rf.votedFor != args.CandidateId {
+	if rf.votedFor != -1 {
 		req.reply <- &reply
 		return
 	}
@@ -351,7 +356,8 @@ func (rf *Raft) handleVoteRequest(req voteReq) {
 	}
 	rf.debugPrint("voted for %v in term %v", args.CandidateId, args.Term)
 	rf.resetElectionTimer()
-	rf.votedFor = &args.CandidateId
+	rf.votedFor = args.CandidateId
+	rf.persist()
 	reply.VoteGranted = true
 	req.reply <- &reply
 }
@@ -361,14 +367,16 @@ func (rf *Raft) becomeFollower(term int) {
 		rf.debugPrint("became follower")
 	}
 	rf.currentTerm = term
-	rf.votedFor = nil
+	rf.votedFor = -1
+	rf.persist()
 	rf.role = follower
 }
 
 func (rf *Raft) becomeCandidate() {
 	rf.role = candidate
 	rf.currentTerm++
-	rf.votedFor = &rf.me
+	rf.votedFor = rf.me
+	rf.persist()
 	rf.electionVotes = 1
 	rf.debugPrint("became candidate")
 	rf.requestAllVotes()
@@ -453,34 +461,34 @@ func (rf *Raft) resetElectionTimer() {
 // after you've implemented snapshots, pass the current snapshot
 // (or nil if there's not yet a snapshot).
 func (rf *Raft) persist() {
-	// Your code here (3C).
-	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// raftstate := w.Bytes()
-	// rf.persister.Save(raftstate, nil)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.log)
+	raftstate := w.Bytes()
+	rf.persister.Save(raftstate, nil)
 }
 
 // restore previously persisted state.
 func (rf *Raft) readPersist(data []byte) {
-	if data == nil || len(data) < 1 { // bootstrap without any state?
+	if len(data) < 1 { // bootstrap without any state?
 		return
 	}
-	// Your code here (3C).
-	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var currentTerm int
+	var votedFor int
+	var log []entry
+	if d.Decode(&currentTerm) != nil ||
+		d.Decode(&votedFor) != nil ||
+		d.Decode(&log) != nil {
+		panic("failed to read persisted data")
+	} else {
+		rf.currentTerm = currentTerm
+		rf.votedFor = votedFor
+		rf.log = log
+	}
 }
 
 // how many bytes in Raft's persisted log?
