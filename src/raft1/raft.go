@@ -21,6 +21,8 @@ import (
 )
 
 const heartbeatInterval = 100 * time.Millisecond
+const electionTimeoutBase = 300
+const electionTimeoutRandom = 200
 
 type role uint8
 
@@ -348,6 +350,7 @@ func (rf *Raft) handleVoteRequest(req voteReq) {
 		return
 	}
 	rf.debugPrint("voted for %v in term %v", args.CandidateId, args.Term)
+	rf.resetElectionTimer()
 	rf.votedFor = &args.CandidateId
 	reply.VoteGranted = true
 	req.reply <- &reply
@@ -438,8 +441,8 @@ func (rf *Raft) GetState() (int, bool) {
 }
 
 func (rf *Raft) resetElectionTimer() {
-	electionTimeout := time.Duration(300+(rand.Int63()%200)) * time.Millisecond
-	rf.electionTimer.Reset(electionTimeout)
+	t := electionTimeoutBase + (rand.Int63() % electionTimeoutRandom)
+	rf.electionTimer.Reset(time.Duration(t) * time.Millisecond)
 }
 
 // save Raft's persistent state to stable storage,
@@ -532,6 +535,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.applyCh = applyCh
 	rf.heartbeatTicker = time.NewTicker(heartbeatInterval)
 	rf.electionTimer = time.NewTimer(1 * time.Second)
+	rf.debugPrint("server %v created", me)
 	rf.resetElectionTimer()
 
 	rf.startRequests = make(chan startReq, 1)
@@ -549,9 +553,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	return rf
 }
 
-var debugTime time.Time = time.Now()
-
 func (rf *Raft) debugPrint(format string, a ...any) {
+	t := time.Since(time.Now().Truncate(time.Hour)).Milliseconds()
 	debug := os.Getenv("RAFT_DEBUG")
 	role := "follower "
 	switch rf.role {
@@ -561,7 +564,16 @@ func (rf *Raft) debugPrint(format string, a ...any) {
 		role = "candidate"
 	}
 
-	part1 := fmt.Sprintf("%v\tid:%v term:%v len:%v commit:%v last:%v\t\t", role, rf.me, rf.currentTerm, len(rf.log), rf.commitIndex, rf.log[len(rf.log)-1])
+	part1 := fmt.Sprintf(
+		"[%v] %v\tid:%v term:%v len:%v commit:%v last:%v\t\t",
+		t,
+		role,
+		rf.me,
+		rf.currentTerm,
+		len(rf.log),
+		rf.commitIndex,
+		rf.log[len(rf.log)-1],
+	)
 	part2 := fmt.Sprintf(format, a...)
 	tester.Annotate(
 		"Server "+strconv.Itoa(rf.me),
