@@ -206,12 +206,11 @@ func (rf *Raft) handleAppendReply(r appendReply) {
 		// update matchIndex only if the replicated log was from my term
 		// so that we never commit entry from previous term (figure 8)
 		if rf.log[lastIndex].Term == rf.currentTerm {
+			rf.matchIndex[rf.me] = len(rf.log)
 			rf.matchIndex[r.serverId] = lastIndex
 		}
 		rf.debugPrint("ok append reply from %v, matchIndex: %v", r.serverId, rf.matchIndex)
-
 		// check if new commit
-		rf.matchIndex[rf.me] = len(rf.log)
 		majority := (len(rf.peers) + 1) / 2
 		matches := make([]int, len(rf.matchIndex))
 		copy(matches, rf.matchIndex)
@@ -270,6 +269,9 @@ func (rf *Raft) handleAppendRequest(req appendRequest) {
 		req.reply <- &reply
 		return
 	}
+
+	// if an existing entry conflicts with a new one (same index, different terms)
+	// delete the exsiting entry and all that follow it
 	prevLogTerm := rf.log[args.PrevLogIndex].Term
 	if prevLogTerm != args.PrevLogTerm {
 		rf.debugPrint(
@@ -285,8 +287,6 @@ func (rf *Raft) handleAppendRequest(req appendRequest) {
 		conflictIndex++
 		reply.ConflictTerm = prevLogTerm
 		reply.ConflictIndex = conflictIndex
-		rf.log = rf.log[:conflictIndex]
-		rf.persist()
 		req.reply <- &reply
 		return
 	}
@@ -514,7 +514,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 }
 
 func (rf *Raft) commitAndApply(newCommitIndex int) {
-	rf.debugPrint("committing until %v", rf.log[newCommitIndex])
+	rf.debugPrint("%v", rf.log[:newCommitIndex+1])
 	// skip dummy log at index 0
 	startIndex := max(rf.commitIndex, 1)
 	for i := startIndex; i <= newCommitIndex; i++ {
@@ -569,8 +569,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 }
 
 func (rf *Raft) debugPrint(format string, a ...any) {
+	if os.Getenv("RAFT_DEBUG") != "true" {
+		return
+	}
 	t := time.Since(time.Now().Truncate(time.Hour)).Milliseconds()
-	debug := os.Getenv("RAFT_DEBUG")
 	role := "follower "
 	switch rf.role {
 	case leader:
@@ -595,8 +597,5 @@ func (rf *Raft) debugPrint(format string, a ...any) {
 		part2,
 		role+part1,
 	)
-	if debug != "true" {
-		return
-	}
 	fmt.Print(part1 + part2 + "\n")
 }
