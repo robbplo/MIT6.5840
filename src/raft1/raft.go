@@ -22,8 +22,8 @@ import (
 	tester "6.5840/tester1"
 )
 
-const heartbeatInterval = 100 * time.Millisecond
-const electionTimeoutBase = 300
+const heartbeatInterval = 400 * time.Millisecond
+const electionTimeoutBase = 1200
 const electionTimeoutRandom = 200
 
 type role uint8
@@ -55,7 +55,7 @@ type Raft struct {
 
 	nextIndex      []int // per server, next entry to send (init leader last log index + 1)
 	matchIndex     []int // per server, highest entry known replicated (init 0, monotonic)
-	appendInFlight []bool
+	appendLastSent []time.Time
 
 	role    role
 	applyCh chan raftapi.ApplyMsg // apply a message to the state machine
@@ -161,8 +161,8 @@ func (rf *Raft) actorLoop() {
 		case <-rf.electionTimer.C:
 			if rf.role != leader {
 				rf.becomeCandidate()
-				rf.resetElectionTimer()
 			}
+			rf.resetElectionTimer()
 		// follower
 		case req := <-rf.appendRequests:
 			rf.handleAppendRequest(req)
@@ -180,7 +180,7 @@ func (rf *Raft) handleStartRequest(req startReq) {
 		req.reply <- startReply{isLeader: false, index: len(rf.log) - 1, term: rf.currentTerm}
 		return
 	}
-	rf.debugPrint("start command: %v nextIndex: %v", req.command, rf.nextIndex)
+	// rf.debugPrint("start command: %v nextIndex: %v", req.command, rf.nextIndex)
 	rf.log = append(rf.log, entry{Command: req.command, Term: rf.currentTerm})
 	rf.persist()
 	rf.sendAllAppendRequests()
@@ -188,23 +188,27 @@ func (rf *Raft) handleStartRequest(req startReq) {
 }
 
 func (rf *Raft) handleAppendReply(r appendReply) {
-	rf.appendInFlight[r.serverId] = false
 	if !r.ok {
 		return
 	}
 	if r.reply.Term > rf.currentTerm {
-		rf.debugPrint("append reply from server in later term %v", r.reply.Term)
+		// rf.debugPrint("append reply from server in later term %v", r.reply.Term)
 		rf.becomeFollower(r.reply.Term)
 		return
 	}
 	if r.args.Term != rf.currentTerm {
-		rf.debugPrint("append reply from past term %v", r.args.Term)
+		// rf.debugPrint("append reply from past term %v", r.args.Term)
 		return
 	}
 	if r.reply.Success {
 		lastIndex := r.args.PrevLogIndex + len(r.args.Entries)
 		rf.nextIndex[r.serverId] = lastIndex + 1
-		rf.matchIndex[r.serverId] = lastIndex
+		// update matchIndex only if the replicated log was from my term
+		// so that we never commit entry from previous term (figure 8)
+		if rf.log[lastIndex].Term == rf.currentTerm {
+			rf.matchIndex[r.serverId] = lastIndex
+		}
+		rf.debugPrint("ok append reply from %v, matchIndex: %v", r.serverId, rf.matchIndex)
 
 		// check if new commit
 		rf.matchIndex[rf.me] = len(rf.log)
@@ -218,6 +222,7 @@ func (rf *Raft) handleAppendReply(r appendReply) {
 		}
 		return
 	}
+	// Deleting too many logs via next index?
 	if r.reply.ConflictTerm == 0 {
 		rf.nextIndex[r.serverId] = r.reply.LogLen
 	} else {
@@ -225,11 +230,14 @@ func (rf *Raft) handleAppendReply(r appendReply) {
 		for i, log := range rf.log {
 			if log.Term == r.reply.ConflictTerm {
 				termStartIndex = i
+				break
 			}
 		}
 		if termStartIndex == -1 {
+			rf.debugPrint("setting next index to conflict index: %v", r.reply.ConflictIndex)
 			rf.nextIndex[r.serverId] = r.reply.ConflictIndex
 		} else {
+			rf.debugPrint("setting next index to term start index: %v", termStartIndex)
 			rf.nextIndex[r.serverId] = termStartIndex
 		}
 	}
@@ -245,7 +253,7 @@ func (rf *Raft) handleAppendRequest(req appendRequest) {
 	reply.LogLen = len(rf.log)
 	// request came from old leader, reject
 	if args.Term < rf.currentTerm {
-		rf.debugPrint("rejecting append from term %v", args.Term)
+		// rf.debugPrint("rejecting append from term %v", args.Term)
 		req.reply <- &reply
 		return
 	}
@@ -265,10 +273,9 @@ func (rf *Raft) handleAppendRequest(req appendRequest) {
 	prevLogTerm := rf.log[args.PrevLogIndex].Term
 	if prevLogTerm != args.PrevLogTerm {
 		rf.debugPrint(
-			"log inconsistency, [args index:%v term:%v] [rf.log index:%v term:%v]",
+			"log inconsistency, index: %v leaderTerm: %v, myTerm: %v",
 			args.PrevLogIndex,
 			args.PrevLogTerm,
-			lastLogIndex,
 			prevLogTerm,
 		)
 		conflictIndex := args.PrevLogIndex
@@ -305,12 +312,12 @@ func (rf *Raft) handleAppendRequest(req appendRequest) {
 func (rf *Raft) handleVoteReply(r voteReply) {
 	if r.reply.Term > rf.currentTerm {
 		rf.currentTerm = r.reply.Term
-		rf.debugPrint("vote reply from server in later term %v", r.reply.Term)
+		// rf.debugPrint("vote reply from server in later term %v", r.reply.Term)
 		rf.becomeFollower(r.reply.Term)
 		return
 	}
 	if r.args.Term != rf.currentTerm {
-		rf.debugPrint("vote reply to from past term %v", r.args.Term)
+		// rf.debugPrint("vote reply from past term %v", r.args.Term)
 		return
 	}
 	if rf.currentTerm >= r.reply.Term && r.reply.VoteGranted {
@@ -329,7 +336,7 @@ func (rf *Raft) handleVoteRequest(req voteReq) {
 	reply.VoteGranted = false
 	// request came from old leader, reject
 	if args.Term < rf.currentTerm {
-		rf.debugPrint("refused to vote for %v in term %v", args.CandidateId, args.Term)
+		// rf.debugPrint("refused to vote for %v in term %v", args.CandidateId, args.Term)
 		req.reply <- &reply
 		return
 	}
@@ -386,7 +393,7 @@ func (rf *Raft) becomeLeader() {
 	for i := range rf.peers {
 		rf.nextIndex[i] = len(rf.log)
 		rf.matchIndex[i] = 0
-		rf.appendInFlight[i] = false
+		rf.appendLastSent[i] = time.Time{}
 	}
 	rf.role = leader
 	rf.debugPrint("became leader")
@@ -404,11 +411,11 @@ func (rf *Raft) sendAllAppendRequests() {
 }
 
 func (rf *Raft) sendOneAppendRequest(id int) {
-	inFlight := rf.appendInFlight[id]
-	if inFlight {
+	lastSent := rf.appendLastSent[id]
+	if time.Since(lastSent) < heartbeatInterval {
 		return
 	}
-	rf.appendInFlight[id] = true
+	rf.appendLastSent[id] = time.Now()
 	nextIndex := rf.nextIndex[id]
 	args := AppendEntriesArgs{
 		Term:         rf.currentTerm,
@@ -539,7 +546,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.log = []entry{{Term: 0, Command: 0}}
 	rf.nextIndex = make([]int, len(rf.peers))
 	rf.matchIndex = make([]int, len(rf.peers))
-	rf.appendInFlight = make([]bool, len(rf.peers))
+	rf.appendLastSent = make([]time.Time, len(rf.peers))
 	rf.applyCh = applyCh
 	rf.heartbeatTicker = time.NewTicker(heartbeatInterval)
 	rf.electionTimer = time.NewTimer(1 * time.Second)

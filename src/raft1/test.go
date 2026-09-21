@@ -185,6 +185,7 @@ func (ts *Test) CheckLogs(i int, m raftapi.ApplyMsg) (string, bool) {
 			// some server has already committed a different value for this entry!
 			err_msg = fmt.Sprintf("commit index=%v server=%v %v != server=%v %v",
 				m.CommandIndex, i, m.Command, j, old)
+			log.Println(err_msg)
 		}
 	}
 	_, prevok := me.entry(m.CommandIndex - 1)
