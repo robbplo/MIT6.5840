@@ -149,7 +149,7 @@ Timing requirement:
 Parallel request and response to all other servers must be much faster than election timeout
 Election timeout must be much lower than average time between failures for single server
 
-## Question 
+## Question 1
 Suppose we have the scenario shown in the Raft paper's Figure 7: a cluster of seven servers, with
 the log contents shown. The first server crashes (the one at the top of the figure), and cannot be
 contacted. A leader election ensues. For each of the servers marked (a), (d), and (f), could that
@@ -157,7 +157,7 @@ server be elected? If yes, which servers would vote for it? If no, what specific
 would prevent it from being elected?
 
 
-## Answer 
+## Answer 1
 Server (a) could be elected. The first server's entry at index 10 was not committed, so (a) has the
 latest committed log state. The only server that would not vote for it is (d), because it has log
 entries with a higher term, in which case `RequestVote` is rejected.
@@ -169,3 +169,63 @@ Server (f) could not be elected. No server would vote for it, because every othe
 entries from terms higher than what (f) has. The **Leader Completeness** property states that
 committed log entries for one term must be present in the logs of leaders for all later terms.
 Electing (f) would violate this property.
+
+
+## Log compaction
+Snapshotting is simplest way to log compaction
+Copy entire state machine state to disk, delete logs that are applied at that moment
+Other ways such as log cleaning or log-structured merge trees work, but require more complexity
+Each server takes snapshots independently, covering comitted part of log
+
+Snapshot includes term and index of last included log
+AppendEntries consistency check will use those for the first log entry after the snapshot
+After snapshot is written, logs until and includid last log index are deleted
+
+Servers take snapshots independently, but sometimes leader must share with lagging followers
+Unlikely under normal circumstances but important for safety
+In this situation leader sends InstallSnapshot
+
+Follower must decide what to do with existing log entries
+**important logic:**
+If snapshot contains information not already in the log, follower discards entire log
+If snapshot *describes a prefix* of log, prefix is deleted but other entries are kept. In that case
+the snapshot is not applied.
+
+Followers taking their own snapshots departs from *strong leader priciple*
+But the alternative has leaders always sending snapshots over network, expensive
+Consensus is already guaranteed, followers can handle snapshotting
+
+Snapshotting performance is another point of concern
+Frequency must be balanced to minimize the disk bandwidth overhead of snapshotting
+Copy-on-write can be used to optimize the writing of a snapshot
+
+## Client interaction
+Clients must send requests to the leader
+Followers reject client requests and provide information about who is the leader
+
+Goal for raft is linearizable semantics:
+Each operation appears to run instantly, exactly once, between invocation and response
+However: Raft may execute command multiple times
+Clients should assign unique serial numbers to each command (idempotency key)
+State machine tracks those numbers and their responses, to prevent double execution
+
+Read-only ops do not need to be included in the log
+But this introduces risk of stale reads, therefore not linearizable
+Two precautions to guarantee linearizability without the log:
+1. Leader must have latest information on which entries are committed. At the start of its term,
+   leader does not know which entries are committed. After entry from its term is committed, it will
+   have all committed entries. Committing a no-op entry at the start of its term means that each
+   leader will know what is committed without requiring a client command
+2. Leader exchanges heartbeats before responding to a read-only command, to check wether there is a
+   new leader.
+
+## Question 2
+Could a received InstallSnapshot RPC cause the state machine to go backwards in time? That is, could
+step 8 in Figure 13 cause the state machine to be reset so that it reflects fewer executed
+operations? If yes, explain how this could happen. If no, explain why it can't happen.
+
+## Answer 2
+It is not possible to go backwards in time. If the snapshot is out of date once it arrives to a
+follower, that would mean that the follower has already applied all logs covered by the snapshot.
+The snapshot is a *prefix* of the log, which means that the follower can safely delete all logs
+covered by the snapshot. The snapshot is not installed.
