@@ -32,14 +32,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	*reply = *<-r
 }
 
-func (rf *Raft) callAppendEntries(serverId int, args AppendEntriesArgs) {
+func (rf *Raft) AppendEntriesRPC(serverId int, args AppendEntriesArgs) {
 	go func() {
-		ok := false
 		attempts := 0
-		for !ok && attempts <= rpcRetries {
+		for attempts <= rpcRetries {
 			attempts++
 			reply := AppendEntriesReply{}
-			ok = rf.peers[serverId].Call("Raft.AppendEntries", args, &reply)
+			ok := rf.peers[serverId].Call("Raft.AppendEntries", args, &reply)
 			if ok {
 				rf.appendReplies <- appendReply{
 					ok:       true,
@@ -52,9 +51,9 @@ func (rf *Raft) callAppendEntries(serverId int, args AppendEntriesArgs) {
 			time.Sleep(rpcRetryDelay)
 		}
 		rf.appendReplies <- appendReply{
-			ok: false,
+			ok:       false,
 			serverId: serverId,
-			args: args,
+			args:     args,
 		}
 	}()
 }
@@ -73,23 +72,23 @@ type RequestVoteReply struct {
 
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	r := make(chan *RequestVoteReply)
-	rf.voteRequests <- voteReq{args: *args, reply: r}
+	rf.voteRequests <- voteRequest{args: *args, reply: r}
 	*reply = *<-r
 }
 
-func (rf *Raft) callRequestVote(server *labrpc.ClientEnd, args RequestVoteArgs) {
+func (rf *Raft) RequestVoteRPC(server *labrpc.ClientEnd, args RequestVoteArgs) {
 	go func() {
-		ok := false
 		attempts := 0
-		for !ok && attempts <= rpcRetries {
+		for attempts <= rpcRetries {
 			attempts++
 			reply := RequestVoteReply{}
-			ok = server.Call("Raft.RequestVote", args, &reply)
+			ok := server.Call("Raft.RequestVote", args, &reply)
 			if ok {
-				rf.voteReplies <- voteReply{args: args, reply: reply}
+				rf.voteReplies <- voteReply{ok: true, args: args, reply: reply}
 				return
 			}
 			time.Sleep(rpcRetryDelay)
 		}
+		rf.voteReplies <- voteReply{ok: false, args: args}
 	}()
 }

@@ -223,6 +223,9 @@ func (rf *Raft) handleAppendRequest(req appendRequest) {
 }
 
 func (rf *Raft) handleVoteReply(r voteReply) {
+	if !r.ok {
+		return
+	}
 	if r.reply.Term > rf.currentTerm {
 		rf.currentTerm = r.reply.Term
 		// rf.debugPrint("vote reply from server in later term %v", r.reply.Term)
@@ -242,7 +245,7 @@ func (rf *Raft) handleVoteReply(r voteReply) {
 	}
 }
 
-func (rf *Raft) handleVoteRequest(req voteReq) {
+func (rf *Raft) handleVoteRequest(req voteRequest) {
 	args := req.args
 	reply := RequestVoteReply{}
 	reply.Term = rf.currentTerm
@@ -345,6 +348,7 @@ func (rf *Raft) sendOneAppendRequest(id int) {
 	var args AppendEntriesArgs
 
 	if nextIndex <= rf.snapshot.LastIndex || len(rf.log) == 1 {
+		// TODO: send install snapshot
 		rf.debugPrint("not sending any logs, gone from snapshot")
 		args = AppendEntriesArgs{
 			Term:         rf.currentTerm,
@@ -371,7 +375,7 @@ func (rf *Raft) sendOneAppendRequest(id int) {
 			LeaderCommit: rf.commitIndex,
 		}
 	}
-	rf.callAppendEntries(id, args)
+	rf.AppendEntriesRPC(id, args)
 }
 
 func (rf *Raft) requestAllVotes() {
@@ -387,7 +391,7 @@ func (rf *Raft) requestAllVotes() {
 			LastLogIndex: lastLogIndex,
 			LastLogTerm:  lastLogTerm,
 		}
-		rf.callRequestVote(srv, args)
+		rf.RequestVoteRPC(srv, args)
 	}
 }
 
@@ -551,7 +555,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.stateRequests = make(chan stateReq, 1)
 	rf.appendRequests = make(chan appendRequest, 1)
 	rf.appendReplies = make(chan appendReply, 1)
-	rf.voteRequests = make(chan voteReq, 1)
+	rf.voteRequests = make(chan voteRequest, 1)
 	rf.voteReplies = make(chan voteReply, 1)
 
 	// initialize from state persisted before a crash

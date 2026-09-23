@@ -43,7 +43,7 @@ type Raft struct {
 	appendRequests chan appendRequest
 	appendReplies  chan appendReply
 
-	voteRequests chan voteReq
+	voteRequests chan voteRequest
 	voteReplies  chan voteReply
 }
 
@@ -66,15 +66,15 @@ type snapshot struct {
 	Data      []byte
 }
 
+type startReq struct {
+	command any
+	reply   chan startReply
+}
+
 type startReply struct {
 	isLeader bool
 	index    int
 	term     int
-}
-
-type startReq struct {
-	command any
-	reply   chan startReply
 }
 
 type snapshotReq struct {
@@ -82,13 +82,13 @@ type snapshotReq struct {
 	snapshot []byte
 }
 
+type stateReq struct {
+	reply chan stateReply
+}
+
 type stateReply struct {
 	isLeader    bool
 	currentTerm int
-}
-
-type stateReq struct {
-	reply chan stateReply
 }
 
 type appendRequest struct {
@@ -103,12 +103,13 @@ type appendReply struct {
 	reply    AppendEntriesReply
 }
 
-type voteReq struct {
+type voteRequest struct {
 	args  RequestVoteArgs
 	reply chan *RequestVoteReply
 }
 
 type voteReply struct {
+	ok    bool
 	args  RequestVoteArgs
 	reply RequestVoteReply
 }
