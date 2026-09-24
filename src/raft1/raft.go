@@ -94,14 +94,14 @@ func (rf *Raft) actorLoop() {
 
 func (rf *Raft) handleStartRequest(req startReq) {
 	if rf.role != leader {
-		req.reply <- startReply{isLeader: false, index: rf.logLength() - 1, term: rf.currentTerm}
+		req.reply <- startReply{isLeader: false, index: rf.lastLogIndex(), term: rf.currentTerm}
 		return
 	}
 	// rf.debugPrint("start command: %v nextIndex: %v", req.command, rf.nextIndex)
 	rf.log = append(rf.log, entry{Command: req.command, Term: rf.currentTerm})
 	rf.persist()
 	rf.sendAllAppendRequests()
-	req.reply <- startReply{isLeader: true, index: rf.logLength() - 1, term: rf.currentTerm}
+	req.reply <- startReply{isLeader: true, index: rf.lastLogIndex(), term: rf.currentTerm}
 }
 
 func (rf *Raft) handleAppendReply(r appendReply) {
@@ -123,7 +123,7 @@ func (rf *Raft) handleAppendReply(r appendReply) {
 		// update matchIndex only if the replicated log was from my term
 		// so that we never commit entry from previous term (figure 8)
 		if rf.getLog(lastIndex).Term == rf.currentTerm {
-			rf.matchIndex[rf.me] = rf.logLength()
+			rf.matchIndex[rf.me] = rf.lastLogIndex()
 			rf.matchIndex[r.serverId] = lastIndex
 		}
 		// rf.debugPrint("ok append reply from %v, matchIndex: %v", r.serverId, rf.matchIndex)
@@ -160,7 +160,7 @@ func (rf *Raft) handleAppendRequest(req appendRequest) {
 
 	reply.Term = rf.currentTerm
 	reply.Success = false
-	reply.LogLen = rf.logLength()
+	reply.LogLen = rf.lastLogIndex()
 	// request came from old leader, reject
 	if args.Term < rf.currentTerm {
 		// rf.debugPrint("rejecting append from term %v", args.Term)
@@ -174,8 +174,7 @@ func (rf *Raft) handleAppendRequest(req appendRequest) {
 	}
 
 	// log inconsistency checks
-	myLastLogIndex := rf.logLength() - 1
-	if args.PrevLogIndex > myLastLogIndex {
+	if args.PrevLogIndex > reply.LogLen {
 		rf.debugPrint("prev log %v not found, requesting more", args.PrevLogIndex)
 		req.reply <- &reply
 		return
@@ -214,7 +213,7 @@ func (rf *Raft) handleAppendRequest(req appendRequest) {
 	}
 
 	if args.LeaderCommit > rf.commitIndex {
-		rf.commitAndApply(min(args.LeaderCommit, rf.logLength()-1))
+		rf.commitAndApply(min(args.LeaderCommit, rf.lastLogIndex()))
 	}
 	req.reply <- &reply
 }
@@ -262,7 +261,7 @@ func (rf *Raft) handleVoteRequest(req voteRequest) {
 		return
 	}
 	// grant vote if candidate's log is at least as up-to-date as own log
-	lastLogIndex := rf.logLength() - 1
+	lastLogIndex := rf.lastLogIndex()
 	lastLogTerm := rf.getLog(lastLogIndex).Term
 	if lastLogTerm > args.LastLogTerm {
 		rf.debugPrint("refused to vote for %v: log term [mine: %v theirs: %v]", args.CandidateId, lastLogTerm, args.LastLogTerm)
@@ -313,7 +312,7 @@ func (rf *Raft) becomeCandidate() {
 
 func (rf *Raft) becomeLeader() {
 	for i := range rf.peers {
-		rf.nextIndex[i] = rf.logLength()
+		rf.nextIndex[i] = rf.lastLogIndex()
 		rf.matchIndex[i] = 0
 		rf.appendLastSent[i] = time.Time{}
 	}
@@ -380,7 +379,7 @@ func (rf *Raft) requestAllVotes() {
 		if id == rf.me {
 			continue
 		}
-		lastLogIndex := rf.logLength() - 1
+		lastLogIndex := rf.lastLogIndex()
 		lastLogTerm := rf.getLog(lastLogIndex).Term
 		args := RequestVoteArgs{
 			Term:         rf.currentTerm,
@@ -476,9 +475,9 @@ func (rf *Raft) logIndex(index int) int {
 	return index - rf.snapshot.LastIndex
 }
 
-// Length of log including snapshot
-func (rf *Raft) logLength() int {
-	return rf.snapshot.LastIndex + len(rf.log)
+// Index of the last log, including snapshot
+func (rf *Raft) lastLogIndex() int {
+	return rf.snapshot.LastIndex + len(rf.log) - 1
 }
 
 // Get a log entry
@@ -524,7 +523,7 @@ func (rf *Raft) copyLogFrom(index int) []entry {
 func (rf *Raft) setLogEntries(entries []entry, startIndex int) {
 	for i, entry := range entries {
 		index := rf.logIndex(startIndex + i)
-		if index > rf.logLength()-1 {
+		if index > rf.lastLogIndex() {
 			rf.log = append(rf.log, entry)
 		} else {
 			if rf.getLog(index).Term != entry.Term {
@@ -624,7 +623,7 @@ func (rf *Raft) debugPrint(format string, a ...any) {
 		len(rf.log)-1,
 		rf.snapshot.LastIndex+len(rf.log)-1,
 		rf.commitIndex,
-		rf.getLog(rf.logLength()-1),
+		rf.getLog(rf.lastLogIndex()),
 	)
 	part2 := fmt.Sprintf(format, a...)
 	tester.Annotate(

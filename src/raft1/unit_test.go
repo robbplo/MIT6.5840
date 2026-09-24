@@ -74,7 +74,7 @@ func TestUnitSetLogEntries(t *testing.T) {
 	})
 	t.Run("clears logs after non-matching term", func(t *testing.T) {
 		rf := &Raft{
-			log: []entry{{0, nil}, {1, 1}, {1, 2}, {2, 3}, {2,4}, {2,5}},
+			log: []entry{{0, nil}, {1, 1}, {1, 2}, {2, 3}, {2, 4}, {2, 5}},
 		}
 
 		rf.setLogEntries([]entry{{1, 1}, {1, 2}, {3, 3}}, 1)
