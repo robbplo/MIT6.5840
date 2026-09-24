@@ -1,9 +1,5 @@
 package raft
 
-import (
-	"6.5840/labrpc"
-)
-
 type AppendEntriesArgs struct {
 	Term         int
 	LeaderId     int
@@ -30,6 +26,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 func (rf *Raft) AppendEntriesRPC(serverId int, args AppendEntriesArgs) {
 	go func() {
 		reply := AppendEntriesReply{}
+		rf.debugPrint("rpc", "AppendEntries to %v", serverId)
 		ok := rf.peers[serverId].Call("Raft.AppendEntries", args, &reply)
 		if ok {
 			rf.appendReplies <- appendReply{
@@ -66,10 +63,11 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	*reply = *<-r
 }
 
-func (rf *Raft) RequestVoteRPC(server *labrpc.ClientEnd, args RequestVoteArgs) {
+func (rf *Raft) RequestVoteRPC(serverId int, args RequestVoteArgs) {
 	go func() {
 		reply := RequestVoteReply{}
-		ok := server.Call("Raft.RequestVote", args, &reply)
+		rf.debugPrint("rpc", "RequestVote to %v", serverId)
+		ok := rf.peers[serverId].Call("Raft.RequestVote", args, &reply)
 		if ok {
 			rf.voteReplies <- voteReply{ok: true, args: args, reply: reply}
 			return
@@ -99,6 +97,7 @@ func (rf *Raft) InstallSnapshot(args InstallSnapshotArgs, reply *InstallSnapshot
 func (rf *Raft) InstallSnapshotRPC(serverId int, args InstallSnapshotArgs) {
 	go func() {
 		reply := InstallSnapshotReply{}
+		rf.debugPrint("rpc", "InstallSnapshot to %v", serverId)
 		ok := rf.peers[serverId].Call("Raft.InstallSnapshot", args, &reply)
 		if ok {
 			rf.installReplies <- installReply{ok: true, serverId: serverId, args: args, reply: reply}

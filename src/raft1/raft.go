@@ -23,8 +23,8 @@ import (
 	tester "6.5840/tester1"
 )
 
-const heartbeatInterval = 100 * time.Millisecond
-const electionTimeoutBase = 400
+const heartbeatInterval = 250 * time.Millisecond
+const electionTimeoutBase = 750
 const electionTimeoutRandom = 200
 
 func (rf *Raft) actorLoop() {
@@ -114,6 +114,7 @@ func (rf *Raft) handleStartRequest(req startRequest) {
 }
 
 func (rf *Raft) handleAppendReply(r appendReply) {
+	rf.appendLastSent[r.serverId] = time.Time{}
 	if !r.ok {
 		return
 	}
@@ -407,8 +408,7 @@ func (rf *Raft) sendAllAppendRequests() {
 func (rf *Raft) sendOneAppendRequest(id int) {
 	lastSent := rf.appendLastSent[id]
 	if time.Since(lastSent) < heartbeatInterval {
-		// return
-		// TODO: find better way to limit rpc count
+		return
 	}
 	rf.appendLastSent[id] = time.Now()
 	nextIndex := rf.nextIndex[id]
@@ -453,7 +453,7 @@ func (rf *Raft) sendInstallSnapshot(serverId int) {
 }
 
 func (rf *Raft) requestAllVotes() {
-	for id, srv := range rf.peers {
+	for id := range rf.peers {
 		if id == rf.me {
 			continue
 		}
@@ -465,7 +465,7 @@ func (rf *Raft) requestAllVotes() {
 			LastLogIndex: lastLogIndex,
 			LastLogTerm:  lastLogTerm,
 		}
-		rf.RequestVoteRPC(srv, args)
+		rf.RequestVoteRPC(id, args)
 	}
 }
 
@@ -702,6 +702,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 // Comment out a topic to keep that category out of the debug output.
 var debugTopics = map[string]bool{
+	// "rpc": true,
 	// "client":      true,
 	"commit": true,
 	// "election":    true,
@@ -712,7 +713,6 @@ var debugTopics = map[string]bool{
 	"snapshot":      true,
 }
 
-var debugLen = 100
 
 func (rf *Raft) debugPrint(topic string, format string, a ...any) {
 	if os.Getenv("RAFT_DEBUG") != "true" || !debugTopics[topic] {
@@ -739,7 +739,7 @@ func (rf *Raft) debugPrint(topic string, format string, a ...any) {
 		rf.getLog(rf.lastLogIndex()).Term,
 		rf.getLog(rf.lastLogIndex()).Command,
 	)
-	debugLen = max(debugLen, len(part1))
+	debugLen := 100
 	spaces := strings.Repeat(" ", debugLen - len(part1))
 
 	part2 := fmt.Sprintf(format, a...)
