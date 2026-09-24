@@ -146,20 +146,22 @@ func (rf *Raft) handleAppendReply(r appendReply) {
 		N := matches[majority-1]
 		if N > rf.commitIndex {
 			rf.commitAndApply(N)
-			// rf.sendAllAppendRequests()
+			rf.sendAllAppendRequests()
 		}
 		return
 	}
 	if r.reply.ConflictTerm == 0 {
-		rf.nextIndex[r.serverId] = r.reply.LastLogIndex
+		// no conflict, next index is after the followers last index
+		rf.nextIndex[r.serverId] = r.reply.LastLogIndex + 1
 	} else {
+		// find next index to send to resovle conflict
 		termStartIndex := rf.findTermStartIndex(r.reply.ConflictTerm)
 		if termStartIndex == -1 {
 			rf.debugPrint("inconsistency", "setting nextIndex[%v] to conflict index: %v", r.serverId, r.reply.ConflictIndex)
-			rf.nextIndex[r.serverId] = max(r.reply.ConflictIndex, rf.snapshot.LastIndex+1)
+			rf.nextIndex[r.serverId] = r.reply.ConflictIndex
 		} else {
 			rf.debugPrint("inconsistency", "setting nextIndex[%v] to term start index: %v", r.serverId, termStartIndex)
-			rf.nextIndex[r.serverId] = max(termStartIndex, rf.snapshot.LastIndex+1)
+			rf.nextIndex[r.serverId] = termStartIndex
 		}
 	}
 	rf.sendOneAppendRequest(r.serverId)
@@ -695,21 +697,22 @@ var debugTopics = map[string]bool{
 	"snapshot":      true,
 }
 
+var debugLen = 100
+
 func (rf *Raft) debugPrint(topic string, format string, a ...any) {
 	if os.Getenv("RAFT_DEBUG") != "true" || !debugTopics[topic] {
 		return
 	}
 	t := time.Since(time.Now().Truncate(time.Hour)).Milliseconds()
-	role := "follower "
+	role := "follower"
 	switch rf.role {
 	case leader:
-		role = "leader   "
+		role = "leader"
 	case candidate:
 		role = "candidate"
 	}
-
 	part1 := fmt.Sprintf(
-		"[%v] %v\tid:%v term:%v snap:%v log:%v/%v commit:%v last:%v\t",
+		"[%v] %v %v\tterm:%v snap:%v log:%v/%v commit:%v last:{%v %v}",
 		t,
 		role,
 		rf.me,
@@ -718,13 +721,16 @@ func (rf *Raft) debugPrint(topic string, format string, a ...any) {
 		len(rf.log)-1,
 		int(rf.snapshot.LastIndex)+len(rf.log)-1,
 		rf.commitIndex,
-		rf.getLog(rf.lastLogIndex()),
+		rf.getLog(rf.lastLogIndex()).Term,
+		rf.getLog(rf.lastLogIndex()).Command,
 	)
+	debugLen = max(debugLen, len(part1)+1)
+
 	part2 := fmt.Sprintf(format, a...)
 	tester.Annotate(
 		"Server "+strconv.Itoa(rf.me),
 		part2,
 		role+part1,
 	)
-	fmt.Print(part1 + part2 + "\n")
+	fmt.Printf("%-*v %v\n", debugLen+1, part1, part2)
 }
