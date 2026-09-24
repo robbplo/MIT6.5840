@@ -68,7 +68,9 @@ func (rf *Raft) actorLoop() {
 		case rep := <-rf.appendReplies:
 			rf.handleAppendReply(rep)
 		case <-rf.heartbeatTicker.C:
-			rf.sendAllAppendRequests()
+			if rf.role == leader {
+				rf.sendAllAppendRequests()
+			}
 		// candidate
 		case r := <-rf.voteReplies:
 			rf.handleVoteReply(r)
@@ -322,9 +324,6 @@ func (rf *Raft) becomeLeader() {
 }
 
 func (rf *Raft) sendAllAppendRequests() {
-	if rf.role != leader {
-		return
-	}
 	rf.heartbeatTicker.Reset(heartbeatInterval)
 	for id := range rf.peers {
 		if id == rf.me {
@@ -501,16 +500,17 @@ func (rf *Raft) findTermStartIndex(term int) logIndex {
 
 // Delete all log entries after `index` exclusive
 func (rf *Raft) clearLogAfter(index logIndex) {
-	// TODO: ensure there are no references
 	rf.log = rf.log[:rf.logIndex(index)+1]
 }
 
 // Delete log entries from start until `index` inclusive
 func (rf *Raft) clearLogThrough(index logIndex) {
-	// TODO: ensure there are no references
-	log := slices.Clone(rf.log[rf.logIndex(index)+1:])
-	rf.log = []entry{{0, nil}}
-	rf.log = append(rf.log, log...)
+	newLog := rf.log[rf.logIndex(index)+1:]
+	for i, entry := range newLog {
+		rf.log[i+1] = entry
+	}
+	rf.log = slices.Delete(rf.log, len(newLog), len(rf.log)-1)
+
 }
 
 // Create a copy of the log starting at `index`, inclusive until the end
@@ -521,18 +521,18 @@ func (rf *Raft) copyLogFrom(index logIndex) []entry {
 // Insert log entries starting at a given index
 func (rf *Raft) setLogEntries(entries []entry, startIndex logIndex) {
 	for i, entry := range entries {
-		index := startIndex + logIndex(i)
-		if index > rf.lastLogIndex() {
+		index := rf.logIndex(startIndex) + i
+		if index >= len(rf.log) {
 			rf.log = append(rf.log, entry)
 		} else {
-			if rf.getLog(index).Term != entry.Term {
+			if rf.log[index].Term != entry.Term {
 				rf.debugPrint(
 					"mid-append inconsistency %v leaderTerm: %v myTerm: %v",
 					index,
 					entry.Term,
-					rf.getLog(index).Term,
+					rf.log[index].Term,
 				)
-				rf.clearLogAfter(index)
+				rf.log = rf.log[:index+1]
 			}
 			rf.log[index] = entry
 		}
@@ -555,7 +555,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.persister = persister
 	rf.me = me
 	rf.role = follower
-	rf.log = []entry{{Term: 0, Command: nil}}
+	rf.log = []entry{{0, nil}}
 	rf.nextIndex = make([]logIndex, len(rf.peers))
 	rf.matchIndex = make([]logIndex, len(rf.peers))
 	rf.appendLastSent = make([]time.Time, len(rf.peers))

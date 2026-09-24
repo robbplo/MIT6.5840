@@ -6,84 +6,85 @@ import (
 )
 
 func TestUnitSetLogEntries(t *testing.T) {
-	t.Run("appends when own log is empty", func(t *testing.T) {
-		rf := &Raft{
-			log: []entry{{0, nil}},
-		}
+	testCases := []struct {
+		description   string
+		snapshotIndex logIndex
+		log           []entry
+		setEntries    []entry
+		setIndex      logIndex
+		want          []entry
+	}{
+		{
+			description:   "appends when own log is empty",
+			snapshotIndex: 0,
+			log:           []entry{{0, nil}},
+			setEntries:    []entry{{1, 1}, {1, 2}},
+			setIndex:      1,
+			want:          []entry{{0, nil}, {1, 1}, {1, 2}},
+		},
+		{
+			description:   "overwrites existing logs with same term and preserves remaining logs",
+			snapshotIndex: 0,
+			log:           []entry{{0, nil}, {1, 0}, {1, 0}, {1, 0}},
+			setEntries:    []entry{{1, 1}, {1, 2}},
+			setIndex:      1,
+			want:          []entry{{0, nil}, {1, 1}, {1, 2}, {1, 0}},
+		},
+		{
+			description:   "overwrites existing logs with same term and appends",
+			snapshotIndex: 0,
+			log:           []entry{{0, nil}, {1, 0}},
+			setEntries:    []entry{{1, 1}, {1, 2}},
+			setIndex:      1,
+			want:          []entry{{0, nil}, {1, 1}, {1, 2}},
+		},
+		{
+			description:   "appends logs",
+			snapshotIndex: 0,
+			log:           []entry{{0, nil}, {1, 0}},
+			setEntries:    []entry{{1, 1}, {1, 2}},
+			setIndex:      2,
+			want:          []entry{{0, nil}, {1, 0}, {1, 1}, {1, 2}},
+		},
+		{
+			description:   "overwrites logs from other term",
+			snapshotIndex: 0,
+			log:           []entry{{0, nil}, {1, 1}, {1, 2}, {2, 3}},
+			setEntries:    []entry{{3, 1}, {3, 2}, {3, 3}},
+			setIndex:      1,
+			want:          []entry{{0, nil}, {3, 1}, {3, 2}, {3, 3}},
+		},
+		{
+			description:   "clears logs after non-matching term",
+			snapshotIndex: 0,
+			log:           []entry{{0, nil}, {1, 1}, {1, 2}, {2, 3}, {2, 4}, {2, 5}},
+			setEntries:    []entry{{1, 1}, {1, 2}, {3, 3}},
+			setIndex:      1,
+			want:          []entry{{0, nil}, {1, 1}, {1, 2}, {3, 3}},
+		},
+		{
+			description:   "with snapshot index",
+			snapshotIndex: 9,
+			log:           []entry{{0, nil}, {1, 1}, {1, 2}, {2, 3}, {2, 4}, {2, 5}},
+			setEntries:    []entry{{1, 1}, {1, 2}, {3, 3}},
+			setIndex:      10,
+			want:          []entry{{0, nil}, {1, 1}, {1, 2}, {3, 3}},
+		},
+	}
+	for _, test := range testCases {
+		t.Run(test.description, func(t *testing.T) {
+			rf := &Raft{
+				log:      test.log,
+				snapshot: snapshot{LastIndex: test.snapshotIndex},
+			}
 
-		rf.setLogEntries([]entry{{1, 1}, {1, 2}}, 1)
+			rf.setLogEntries(test.setEntries, test.setIndex)
 
-		wantLog := []entry{{0, nil}, {1, 1}, {1, 2}}
-		if !reflect.DeepEqual(rf.log, wantLog) {
-			t.Errorf("log = %v, want %v", rf.log, wantLog)
-		}
-	})
-
-	t.Run("overwrites existing logs with same term and preserves next", func(t *testing.T) {
-		rf := &Raft{
-			log: []entry{{0, nil}, {1, 0}, {1, 0}, {1, 0}},
-		}
-
-		rf.setLogEntries([]entry{{1, 1}, {1, 2}}, 1)
-
-		wantLog := []entry{{0, nil}, {1, 1}, {1, 2}, {1, 0}}
-		if !reflect.DeepEqual(rf.log, wantLog) {
-			t.Errorf("log = %v, want %v", rf.log, wantLog)
-		}
-	})
-
-	t.Run("overwrites existing logs with same term and appends", func(t *testing.T) {
-		rf := &Raft{
-			log: []entry{{0, nil}, {1, 0}},
-		}
-
-		rf.setLogEntries([]entry{{1, 1}, {1, 2}}, 1)
-
-		wantLog := []entry{{0, nil}, {1, 1}, {1, 2}}
-		if !reflect.DeepEqual(rf.log, wantLog) {
-			t.Errorf("log = %v, want %v", rf.log, wantLog)
-		}
-	})
-
-	t.Run("appends logs", func(t *testing.T) {
-		rf := &Raft{
-			log: []entry{{0, nil}, {1, 0}},
-		}
-
-		rf.setLogEntries([]entry{{1, 1}, {1, 2}}, 2)
-
-		wantLog := []entry{{0, nil}, {1, 0}, {1, 1}, {1, 2}}
-		if !reflect.DeepEqual(rf.log, wantLog) {
-			t.Errorf("log = %v, want %v", rf.log, wantLog)
-		}
-
-	})
-
-	t.Run("overwrites logs from other term", func(t *testing.T) {
-		rf := &Raft{
-			log: []entry{{0, nil}, {1, 1}, {1, 2}, {2, 3}},
-		}
-
-		rf.setLogEntries([]entry{{3, 1}, {3, 2}, {3, 3}}, 1)
-
-		wantLog := []entry{{0, nil}, {3, 1}, {3, 2}, {3, 3}}
-		if !reflect.DeepEqual(rf.log, wantLog) {
-			t.Errorf("log = %v, want %v", rf.log, wantLog)
-		}
-
-	})
-	t.Run("clears logs after non-matching term", func(t *testing.T) {
-		rf := &Raft{
-			log: []entry{{0, nil}, {1, 1}, {1, 2}, {2, 3}, {2, 4}, {2, 5}},
-		}
-
-		rf.setLogEntries([]entry{{1, 1}, {1, 2}, {3, 3}}, 1)
-
-		wantLog := []entry{{0, nil}, {1, 1}, {1, 2}, {3, 3}}
-		if !reflect.DeepEqual(rf.log, wantLog) {
-			t.Errorf("log = %v, want %v", rf.log, wantLog)
-		}
-	})
+			if !reflect.DeepEqual(rf.log, test.want) {
+				t.Errorf("log = %v, want %v", rf.log, test.want)
+			}
+		})
+	}
 }
 
 func TestUnitClearLogAfter(t *testing.T) {
