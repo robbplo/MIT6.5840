@@ -126,7 +126,7 @@ func (rf *Raft) handleAppendReply(r appendReply) {
 	if r.reply.Success {
 		lastIndex := r.args.PrevLogIndex + logIndex(len(r.args.Entries))
 		if lastIndex+1 < rf.nextIndex[r.serverId] {
-			rf.debugPrint("replication", "regression in nextIndex")
+			rf.debugPrint("inconsistency", "regression in nextIndex")
 		}
 		rf.nextIndex[r.serverId] = lastIndex + 1
 		// update matchIndex only if the replicated log was from my term
@@ -146,7 +146,7 @@ func (rf *Raft) handleAppendReply(r appendReply) {
 		N := matches[majority-1]
 		if N > rf.commitIndex {
 			rf.commitAndApply(N)
-			// TODO: rf.sendAllAppendRequests()
+			// rf.sendAllAppendRequests()
 		}
 		return
 	}
@@ -155,10 +155,10 @@ func (rf *Raft) handleAppendReply(r appendReply) {
 	} else {
 		termStartIndex := rf.findTermStartIndex(r.reply.ConflictTerm)
 		if termStartIndex == -1 {
-			rf.debugPrint("replication", "setting nextIndex[%v] to conflict index: %v", r.serverId, r.reply.ConflictIndex)
+			rf.debugPrint("inconsistency", "setting nextIndex[%v] to conflict index: %v", r.serverId, r.reply.ConflictIndex)
 			rf.nextIndex[r.serverId] = max(r.reply.ConflictIndex, rf.snapshot.LastIndex+1)
 		} else {
-			rf.debugPrint("replication", "setting nextIndex[%v] to term start index: %v", r.serverId, termStartIndex)
+			rf.debugPrint("inconsistency", "setting nextIndex[%v] to term start index: %v", r.serverId, termStartIndex)
 			rf.nextIndex[r.serverId] = max(termStartIndex, rf.snapshot.LastIndex+1)
 		}
 	}
@@ -176,6 +176,7 @@ func (rf *Raft) handleInstallReply(rep installReply) {
 	id := rep.serverId
 	rf.nextIndex[id] = max(rf.nextIndex[id], rep.args.LastIncludedIndex+1)
 	rf.matchIndex[id] = max(rf.nextIndex[id], rep.args.LastIncludedIndex)
+	rf.debugPrint("replication", "install reply from %v for snapshot %v", rep.serverId, rep.args.LastIncludedIndex)
 }
 
 func (rf *Raft) handleAppendRequest(req appendRequest) {
@@ -196,7 +197,6 @@ func (rf *Raft) handleAppendRequest(req appendRequest) {
 		rf.becomeFollower(args.Term)
 	}
 
-	// log inconsistency checks
 	if args.PrevLogIndex > reply.LastLogIndex {
 		rf.debugPrint("replication", "prev log %v not found, requesting more", args.PrevLogIndex)
 		req.reply <- &reply
@@ -207,21 +207,21 @@ func (rf *Raft) handleAppendRequest(req appendRequest) {
 	// find term start index and request more logs
 	myPrevLogTerm := rf.getLog(args.PrevLogIndex).Term
 	if myPrevLogTerm != args.PrevLogTerm {
-		rf.debugPrint(
-			"replication",
-			"log inconsistency in previous, index: %v leaderTerm: %v, myTerm: %v",
-			args.PrevLogIndex,
-			args.PrevLogTerm,
-			myPrevLogTerm,
-		)
 		conflictIndex := args.PrevLogIndex
-		for conflictIndex > 0 && rf.getLog(conflictIndex).Term == myPrevLogTerm {
+		for conflictIndex > rf.snapshot.LastIndex && rf.getLog(conflictIndex).Term == myPrevLogTerm {
 			conflictIndex--
 		}
 		conflictIndex++
 		reply.ConflictTerm = myPrevLogTerm
 		reply.ConflictIndex = conflictIndex
-		rf.debugPrint("replication", "requesting logs starting at conflict index %v", conflictIndex)
+		rf.debugPrint(
+			"inconsistency",
+			"log inconsistency in previous, index: %v leaderTerm: %v, myTerm: %v",
+			args.PrevLogIndex,
+			args.PrevLogTerm,
+			myPrevLogTerm,
+		)
+		rf.debugPrint("inconsistency", "requesting logs starting at conflict index %v", conflictIndex)
 		req.reply <- &reply
 		return
 	}
@@ -408,6 +408,7 @@ func (rf *Raft) sendOneAppendRequest(id int) {
 	lastSent := rf.appendLastSent[id]
 	if time.Since(lastSent) < heartbeatInterval {
 		// return
+		// TODO: find better way to limit rpc count
 	}
 	rf.appendLastSent[id] = time.Now()
 	nextIndex := rf.nextIndex[id]
@@ -427,17 +428,12 @@ func (rf *Raft) sendOneAppendRequest(id int) {
 	} else {
 		prevLogIndex := nextIndex - 1
 		prevLogTerm := rf.getLog(prevLogIndex).Term
-		entries := []entry{}
-		// add entries if request asked for logs after the snapshot
-		if prevLogIndex >= rf.snapshot.LastIndex {
-			entries = rf.copyLogFrom(nextIndex)
-		}
 		args = AppendEntriesArgs{
 			Term:         rf.currentTerm,
 			LeaderId:     rf.me,
 			PrevLogIndex: prevLogIndex,
 			PrevLogTerm:  prevLogTerm,
-			Entries:      entries,
+			Entries:      rf.copyLogFrom(nextIndex),
 			LeaderCommit: rf.commitIndex,
 		}
 	}
@@ -445,6 +441,7 @@ func (rf *Raft) sendOneAppendRequest(id int) {
 }
 
 func (rf *Raft) sendInstallSnapshot(serverId int) {
+	rf.debugPrint("replication", "sending %v snapshot %v", serverId, rf.snapshot.LastIndex)
 	args := InstallSnapshotArgs{
 		Term:              rf.currentTerm,
 		LeaderId:          rf.me,
@@ -452,8 +449,7 @@ func (rf *Raft) sendInstallSnapshot(serverId int) {
 		LastIncludedTerm:  rf.snapshot.LastTerm,
 		Data:              rf.snapshot.Data,
 	}
-
-	rf.InstallSnapshotRPC(serverId, &args)
+	rf.InstallSnapshotRPC(serverId, args)
 }
 
 func (rf *Raft) requestAllVotes() {
@@ -692,10 +688,11 @@ var debugTopics = map[string]bool{
 	// "client":      true,
 	"commit": true,
 	// "election":    true,
-	"replication": true,
-	"role":        true,
-	"server":      true,
-	"snapshot":    true,
+	"replication":   true,
+	"inconsistency": true,
+	"role":          true,
+	"server":        true,
+	"snapshot":      true,
 }
 
 func (rf *Raft) debugPrint(topic string, format string, a ...any) {
@@ -712,7 +709,7 @@ func (rf *Raft) debugPrint(topic string, format string, a ...any) {
 	}
 
 	part1 := fmt.Sprintf(
-		"[%v] %v\tid:%v term:%v snap:%v log:%v/%v commit:%v last:%v\t\t",
+		"[%v] %v\tid:%v term:%v snap:%v log:%v/%v commit:%v last:%v\t",
 		t,
 		role,
 		rf.me,

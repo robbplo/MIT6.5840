@@ -121,13 +121,13 @@ type voteReply struct {
 }
 
 type installRequest struct {
-	args  *InstallSnapshotArgs
+	args  InstallSnapshotArgs
 	reply chan InstallSnapshotReply
 }
 
 type installReply struct {
 	ok       bool
 	serverId int
-	args     *InstallSnapshotArgs
+	args     InstallSnapshotArgs
 	reply    InstallSnapshotReply
 }

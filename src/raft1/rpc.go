@@ -90,13 +90,13 @@ type InstallSnapshotReply struct {
 	Term int
 }
 
-func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
+func (rf *Raft) InstallSnapshot(args InstallSnapshotArgs, reply *InstallSnapshotReply) {
 	r := make(chan InstallSnapshotReply)
 	rf.installRequests <- installRequest{args: args, reply: r}
 	*reply = <-r
 }
 
-func (rf *Raft) InstallSnapshotRPC(serverId int, args *InstallSnapshotArgs) {
+func (rf *Raft) InstallSnapshotRPC(serverId int, args InstallSnapshotArgs) {
 	go func() {
 		reply := InstallSnapshotReply{}
 		ok := rf.peers[serverId].Call("Raft.InstallSnapshot", args, &reply)
