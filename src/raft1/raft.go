@@ -126,7 +126,7 @@ func (rf *Raft) handleAppendReply(r appendReply) {
 			rf.matchIndex[rf.me] = rf.logLength()
 			rf.matchIndex[r.serverId] = lastIndex
 		}
-		rf.debugPrint("ok append reply from %v, matchIndex: %v", r.serverId, rf.matchIndex)
+		// rf.debugPrint("ok append reply from %v, matchIndex: %v", r.serverId, rf.matchIndex)
 		// check if new commit
 		majority := (len(rf.peers) + 1) / 2
 		matches := make([]int, len(rf.matchIndex))
@@ -163,7 +163,7 @@ func (rf *Raft) handleAppendRequest(req appendRequest) {
 	reply.LogLen = rf.logLength()
 	// request came from old leader, reject
 	if args.Term < rf.currentTerm {
-		rf.debugPrint("rejecting append from term %v", args.Term)
+		// rf.debugPrint("rejecting append from term %v", args.Term)
 		req.reply <- &reply
 		return
 	}
@@ -174,44 +174,41 @@ func (rf *Raft) handleAppendRequest(req appendRequest) {
 	}
 
 	// log inconsistency checks
-	lastLogIndex := rf.logLength() - 1
-	if args.PrevLogIndex > lastLogIndex {
+	myLastLogIndex := rf.logLength() - 1
+	if args.PrevLogIndex > myLastLogIndex {
 		rf.debugPrint("prev log %v not found, requesting more", args.PrevLogIndex)
 		req.reply <- &reply
 		return
 	}
 
-	// if an existing entry conflicts with a new one (same index, different terms)
-	// delete the exsiting entry and all that follow it
-	prevLogTerm := rf.getLog(args.PrevLogIndex).Term
-	if prevLogTerm != args.PrevLogTerm {
+	// if the previous log entry does not match the leader, replace all logs of the wrong term
+	// find term start index and request more logs
+	myPrevLogTerm := rf.getLog(args.PrevLogIndex).Term
+	if myPrevLogTerm != args.PrevLogTerm {
 		rf.debugPrint(
-			"log inconsistency, index: %v leaderTerm: %v, myTerm: %v",
+			"log inconsistency in previous, index: %v leaderTerm: %v, myTerm: %v",
 			args.PrevLogIndex,
 			args.PrevLogTerm,
-			prevLogTerm,
+			myPrevLogTerm,
 		)
 		conflictIndex := args.PrevLogIndex
-		for conflictIndex > 0 && rf.getLog(conflictIndex).Term == prevLogTerm {
+		for conflictIndex > 0 && rf.getLog(conflictIndex).Term == myPrevLogTerm {
 			conflictIndex--
 		}
 		conflictIndex++
-		reply.ConflictTerm = prevLogTerm
+		reply.ConflictTerm = myPrevLogTerm
 		reply.ConflictIndex = conflictIndex
 		rf.debugPrint("requesting logs starting at conflict index %v", conflictIndex)
 		req.reply <- &reply
 		return
 	}
 
-	// TODO: Should only truncate on conflict
-	if lastLogIndex > args.PrevLogIndex {
-		rf.debugPrint("have more logs than PrevLogIndex, truncating until: %v", args.PrevLogIndex)
-		rf.clearLogAfter(args.PrevLogIndex)
-	}
-
+	// if an existing entry conflicts with a new one (same index, different terms)
+	// delete the exsiting entry and all that follow it
 	reply.Success = true
+	rf.setLogEntries(args.Entries, args.PrevLogIndex+1)
+
 	if len(args.Entries) > 0 {
-		rf.log = append(rf.log, args.Entries...)
 		rf.persist()
 		rf.debugPrint("appended logs: %v", len(args.Entries))
 	}
@@ -523,6 +520,27 @@ func (rf *Raft) copyLogFrom(index int) []entry {
 	return slices.Clone(rf.log[rf.logIndex(index):])
 }
 
+// Insert log entries starting at a given index
+func (rf *Raft) setLogEntries(entries []entry, startIndex int) {
+	for i, entry := range entries {
+		index := rf.logIndex(startIndex + i)
+		if index > rf.logLength()-1 {
+			rf.log = append(rf.log, entry)
+		} else {
+			if rf.getLog(index).Term != entry.Term {
+				rf.debugPrint(
+					"mid-append inconsistency %v leaderTerm: %v myTerm: %v",
+					index,
+					entry.Term,
+					rf.getLog(index).Term,
+				)
+				rf.clearLogAfter(index)
+			}
+			rf.log[index] = entry
+		}
+	}
+}
+
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
 // server's port is peers[me]. all the servers' peers[] arrays
@@ -546,7 +564,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.applyCh = applyCh
 	rf.heartbeatTicker = time.NewTicker(heartbeatInterval)
 	rf.electionTimer = time.NewTimer(1 * time.Second)
-	rf.debugPrint("server %v created", me)
 	rf.resetElectionTimer()
 
 	rf.startRequests = make(chan startReq, 1)
@@ -563,6 +580,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// TODO: snapshot
 	// persister.ReadSnapshot()
 
+	rf.debugPrint("server %v created", me)
 	go rf.actorLoop()
 
 	return rf
