@@ -224,6 +224,7 @@ func (rf *Raft) handleAppendRequest(req appendRequest) {
 	reply.Success = true
 
 	if len(args.Entries) > 0 {
+		rf.setLogEntries(args.Entries, args.PrevLogIndex+1)
 		rf.persist()
 	}
 
@@ -518,6 +519,9 @@ func (rf *Raft) readPersist(data []byte) {
 func (rf *Raft) commitAndApply(newCommitIndex logIndex) {
 	// skip dummy log at index 0
 	startIndex := rf.commitIndex + 1
+	if newCommitIndex < startIndex {
+		return
+	}
 	rf.debugPrint("committing from %v until %v", startIndex, newCommitIndex)
 	for i := startIndex; i <= newCommitIndex; i++ {
 		select {
