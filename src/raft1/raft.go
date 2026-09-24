@@ -154,7 +154,7 @@ func (rf *Raft) handleAppendReply(r appendReply) {
 		// no conflict, next index is after the followers last index
 		rf.nextIndex[r.serverId] = r.reply.LastLogIndex + 1
 	} else {
-		// find next index to send to resovle conflict
+		// find next index to send to resolve conflict
 		termStartIndex := rf.findTermStartIndex(r.reply.ConflictTerm)
 		if termStartIndex == -1 {
 			rf.debugPrint("inconsistency", "setting nextIndex[%v] to conflict index: %v", r.serverId, r.reply.ConflictIndex)
@@ -499,18 +499,16 @@ func (rf *Raft) persist() {
 	e.Encode(rf.currentTerm)
 	e.Encode(rf.votedFor)
 	e.Encode(rf.log)
+	e.Encode(rf.snapshot.LastIndex)
+	e.Encode(rf.snapshot.LastTerm)
 	raftstate := w.Bytes()
-	var snapshot []byte = nil
-	if len(rf.snapshot.Data) > 0 {
-		snapshot = rf.snapshot.Data
-	}
 	if rf.persister != nil {
-		rf.persister.Save(raftstate, snapshot)
+		rf.persister.Save(raftstate, rf.snapshot.Data)
 	}
 }
 
 // restore previously persisted state.
-func (rf *Raft) readPersist(data []byte) {
+func (rf *Raft) readPersist(data []byte, snapshot []byte) {
 	if len(data) < 1 { // bootstrap without any state?
 		return
 	}
@@ -519,14 +517,22 @@ func (rf *Raft) readPersist(data []byte) {
 	var currentTerm int
 	var votedFor int
 	var log []entry
+	var snapshotIndex logIndex
+	var snapshotTerm int
 	if d.Decode(&currentTerm) != nil ||
 		d.Decode(&votedFor) != nil ||
-		d.Decode(&log) != nil {
+		d.Decode(&log) != nil ||
+		d.Decode(&snapshotIndex) != nil ||
+		d.Decode(&snapshotTerm) != nil {
 		panic("failed to read persisted data")
 	} else {
 		rf.currentTerm = currentTerm
 		rf.votedFor = votedFor
 		rf.log = log
+		rf.commitIndex = snapshotIndex
+		rf.snapshot.LastIndex = snapshotIndex
+		rf.snapshot.LastTerm = snapshotTerm
+		rf.snapshot.Data = snapshot
 	}
 }
 
@@ -675,9 +681,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.installReplies = make(chan installReply, 1)
 
 	// initialize from state persisted before a crash
-	rf.readPersist(persister.ReadRaftState())
-	// TODO: snapshot
-	// persister.ReadSnapshot()
+	rf.readPersist(persister.ReadRaftState(), persister.ReadSnapshot())
 
 	rf.debugPrint("server", "server %v created", me)
 	go rf.actorLoop()
