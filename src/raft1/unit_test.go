@@ -23,11 +23,27 @@ func TestUnitSetLogEntries(t *testing.T) {
 			want:          []entry{{0, nil}, {1, 1}, {1, 2}},
 		},
 		{
+			description:   "appends when own log is empty (snapshot)",
+			snapshotIndex: 9,
+			log:           []entry{{0, nil}},
+			setEntries:    []entry{{1, 1}, {1, 2}},
+			setIndex:      10,
+			want:          []entry{{0, nil}, {1, 1}, {1, 2}},
+		},
+		{
 			description:   "overwrites existing logs with same term and preserves remaining logs",
 			snapshotIndex: 0,
 			log:           []entry{{0, nil}, {1, 0}, {1, 0}, {1, 0}},
 			setEntries:    []entry{{1, 1}, {1, 2}},
 			setIndex:      1,
+			want:          []entry{{0, nil}, {1, 1}, {1, 2}, {1, 0}},
+		},
+		{
+			description:   "overwrites existing logs with same term and preserves remaining logs (snapshot)",
+			snapshotIndex: 34,
+			log:           []entry{{0, nil}, {1, 0}, {1, 0}, {1, 0}},
+			setEntries:    []entry{{1, 1}, {1, 2}},
+			setIndex:      35,
 			want:          []entry{{0, nil}, {1, 1}, {1, 2}, {1, 0}},
 		},
 		{
@@ -63,7 +79,7 @@ func TestUnitSetLogEntries(t *testing.T) {
 			want:          []entry{{0, nil}, {1, 1}, {1, 2}, {3, 3}},
 		},
 		{
-			description:   "with snapshot index",
+			description:   "clears logs after non-matching term (snapshot)",
 			snapshotIndex: 9,
 			log:           []entry{{0, nil}, {1, 1}, {1, 2}, {2, 3}, {2, 4}, {2, 5}},
 			setEntries:    []entry{{1, 1}, {1, 2}, {3, 3}},
