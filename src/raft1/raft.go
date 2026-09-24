@@ -14,7 +14,6 @@ import (
 	"os"
 	"slices"
 	"strconv"
-	"strings"
 	"time"
 
 	"6.5840/labgob"
@@ -24,43 +23,8 @@ import (
 )
 
 const heartbeatInterval = 100 * time.Millisecond
-const electionTimeoutBase = 300
+const electionTimeoutBase = 400
 const electionTimeoutRandom = 200
-
-// the service using Raft (e.g. a k/v server) wants to start
-// agreement on the next command to be appended to Raft's log. if this
-// server isn't the leader, returns false. otherwise start the
-// agreement and return immediately. there is no guarantee that this
-// command will ever be committed to the Raft log, since the leader
-// may fail or lose an election.
-//
-// the first return value is the index that the command will appear at
-// if it's ever committed. the second return value is the current
-// term. the third return value is true if this server believes it is
-// the leader.
-func (rf *Raft) Start(command any) (int, int, bool) {
-	r := make(chan startReply)
-	rf.startRequests <- startRequest{command: command, reply: r}
-	reply := <-r
-
-	return int(reply.index), reply.term, reply.isLeader
-}
-
-// the service says it has created a snapshot that has
-// all info up to and including index. this means the
-// service no longer needs the log through (and including)
-// that index. Raft should now trim its log as much as possible.
-func (rf *Raft) Snapshot(index int, snapshot []byte) {
-	rf.snapshotRequests <- snapshotRequest{
-		index:    logIndex(index),
-		snapshot: slices.Clone(snapshot),
-	}
-}
-
-// how many bytes in Raft's persisted log?
-func (rf *Raft) PersistBytes() int {
-	return rf.persister.RaftStateSize()
-}
 
 func (rf *Raft) actorLoop() {
 	for true {
@@ -101,12 +65,47 @@ func (rf *Raft) actorLoop() {
 	}
 }
 
+// the service using Raft (e.g. a k/v server) wants to start
+// agreement on the next command to be appended to Raft's log. if this
+// server isn't the leader, returns false. otherwise start the
+// agreement and return immediately. there is no guarantee that this
+// command will ever be committed to the Raft log, since the leader
+// may fail or lose an election.
+//
+// the first return value is the index that the command will appear at
+// if it's ever committed. the second return value is the current
+// term. the third return value is true if this server believes it is
+// the leader.
+func (rf *Raft) Start(command any) (int, int, bool) {
+	r := make(chan startReply)
+	rf.startRequests <- startRequest{command: command, reply: r}
+	reply := <-r
+
+	return int(reply.index), reply.term, reply.isLeader
+}
+
+// the service says it has created a snapshot that has
+// all info up to and including index. this means the
+// service no longer needs the log through (and including)
+// that index. Raft should now trim its log as much as possible.
+func (rf *Raft) Snapshot(index int, snapshot []byte) {
+	rf.snapshotRequests <- snapshotRequest{
+		index:    logIndex(index),
+		snapshot: slices.Clone(snapshot),
+	}
+}
+
+// how many bytes in Raft's persisted log?
+func (rf *Raft) PersistBytes() int {
+	return rf.persister.RaftStateSize()
+}
+
 func (rf *Raft) handleStartRequest(req startRequest) {
 	if rf.role != leader {
 		req.reply <- startReply{isLeader: false, index: rf.lastLogIndex(), term: rf.currentTerm}
 		return
 	}
-	rf.debugPrint("start command: %v nextIndex: %v", req.command, rf.nextIndex)
+	rf.debugPrint("client", "start command: %v nextIndex: %v", req.command, rf.nextIndex)
 	rf.log = append(rf.log, entry{Command: req.command, Term: rf.currentTerm})
 	rf.persist()
 	rf.sendAllAppendRequests()
@@ -118,16 +117,17 @@ func (rf *Raft) handleAppendReply(r appendReply) {
 		return
 	}
 	if r.reply.Term > rf.currentTerm {
-		// rf.debugPrint("append reply from server in later term %v", r.reply.Term)
 		rf.becomeFollower(r.reply.Term)
 		return
 	}
 	if r.args.Term != rf.currentTerm {
-		// rf.debugPrint("append reply from past term %v", r.args.Term)
 		return
 	}
 	if r.reply.Success {
 		lastIndex := r.args.PrevLogIndex + logIndex(len(r.args.Entries))
+		if lastIndex+1 < rf.nextIndex[r.serverId] {
+			rf.debugPrint("replication", "regression in nextIndex")
+		}
 		rf.nextIndex[r.serverId] = lastIndex + 1
 		// update matchIndex only if the replicated log was from my term
 		// so that we never commit entry from previous term (figure 8)
@@ -135,7 +135,9 @@ func (rf *Raft) handleAppendReply(r appendReply) {
 			rf.matchIndex[rf.me] = rf.lastLogIndex()
 			rf.matchIndex[r.serverId] = lastIndex
 		}
-		// rf.debugPrint("ok append reply from %v, matchIndex: %v", r.serverId, rf.matchIndex)
+		if len(r.args.Entries) > 0 {
+			rf.debugPrint("replication", "ok append reply from %v, matchIndex: %v", r.serverId, rf.matchIndex)
+		}
 		// check if new commit
 		majority := (len(rf.peers) + 1) / 2
 		matches := make([]logIndex, len(rf.matchIndex))
@@ -144,19 +146,19 @@ func (rf *Raft) handleAppendReply(r appendReply) {
 		N := matches[majority-1]
 		if N > rf.commitIndex {
 			rf.commitAndApply(N)
+			// TODO: rf.sendAllAppendRequests()
 		}
 		return
 	}
-	// Deleting too many logs via next index?
 	if r.reply.ConflictTerm == 0 {
 		rf.nextIndex[r.serverId] = r.reply.LastLogIndex
 	} else {
 		termStartIndex := rf.findTermStartIndex(r.reply.ConflictTerm)
 		if termStartIndex == -1 {
-			rf.debugPrint("setting nextIndex[%v] to conflict index: %v", r.serverId, r.reply.ConflictIndex)
+			rf.debugPrint("replication", "setting nextIndex[%v] to conflict index: %v", r.serverId, r.reply.ConflictIndex)
 			rf.nextIndex[r.serverId] = max(r.reply.ConflictIndex, rf.snapshot.LastIndex+1)
 		} else {
-			rf.debugPrint("setting nextIndex[%v] to term start index: %v", r.serverId, termStartIndex)
+			rf.debugPrint("replication", "setting nextIndex[%v] to term start index: %v", r.serverId, termStartIndex)
 			rf.nextIndex[r.serverId] = max(termStartIndex, rf.snapshot.LastIndex+1)
 		}
 	}
@@ -167,8 +169,13 @@ func (rf *Raft) handleInstallReply(rep installReply) {
 	if !rep.ok {
 		return
 	}
-	rf.nextIndex[rep.serverId] = rep.args.LastIncludedIndex + 1
-	rf.matchIndex[rep.serverId] = rep.args.LastIncludedIndex
+	if rep.reply.Term > rf.currentTerm {
+		rf.becomeFollower(rep.reply.Term)
+		return
+	}
+	id := rep.serverId
+	rf.nextIndex[id] = max(rf.nextIndex[id], rep.args.LastIncludedIndex+1)
+	rf.matchIndex[id] = max(rf.nextIndex[id], rep.args.LastIncludedIndex)
 }
 
 func (rf *Raft) handleAppendRequest(req appendRequest) {
@@ -180,7 +187,6 @@ func (rf *Raft) handleAppendRequest(req appendRequest) {
 	reply.LastLogIndex = rf.lastLogIndex()
 	// request came from old leader, reject
 	if args.Term < rf.currentTerm {
-		// rf.debugPrint("rejecting append from term %v", args.Term)
 		req.reply <- &reply
 		return
 	}
@@ -192,7 +198,7 @@ func (rf *Raft) handleAppendRequest(req appendRequest) {
 
 	// log inconsistency checks
 	if args.PrevLogIndex > reply.LastLogIndex {
-		rf.debugPrint("prev log %v not found, requesting more", args.PrevLogIndex)
+		rf.debugPrint("replication", "prev log %v not found, requesting more", args.PrevLogIndex)
 		req.reply <- &reply
 		return
 	}
@@ -202,6 +208,7 @@ func (rf *Raft) handleAppendRequest(req appendRequest) {
 	myPrevLogTerm := rf.getLog(args.PrevLogIndex).Term
 	if myPrevLogTerm != args.PrevLogTerm {
 		rf.debugPrint(
+			"replication",
 			"log inconsistency in previous, index: %v leaderTerm: %v, myTerm: %v",
 			args.PrevLogIndex,
 			args.PrevLogTerm,
@@ -214,7 +221,7 @@ func (rf *Raft) handleAppendRequest(req appendRequest) {
 		conflictIndex++
 		reply.ConflictTerm = myPrevLogTerm
 		reply.ConflictIndex = conflictIndex
-		rf.debugPrint("requesting logs starting at conflict index %v", conflictIndex)
+		rf.debugPrint("replication", "requesting logs starting at conflict index %v", conflictIndex)
 		req.reply <- &reply
 		return
 	}
@@ -226,9 +233,15 @@ func (rf *Raft) handleAppendRequest(req appendRequest) {
 	if len(args.Entries) > 0 {
 		rf.setLogEntries(args.Entries, args.PrevLogIndex+1)
 		rf.persist()
+		rf.debugPrint(
+			"replication",
+			"set logs %v through %v",
+			args.PrevLogIndex+1,
+			int(args.PrevLogIndex)+1+len(args.Entries),
+		)
 	}
 
-	if args.LeaderCommit > rf.commitIndex {
+	if args.LeaderCommit > rf.commitIndex && rf.getLog(rf.lastLogIndex()).Term == rf.currentTerm {
 		rf.commitAndApply(min(args.LeaderCommit, rf.lastLogIndex()))
 	}
 	req.reply <- &reply
@@ -240,12 +253,10 @@ func (rf *Raft) handleVoteReply(r voteReply) {
 	}
 	if r.reply.Term > rf.currentTerm {
 		rf.currentTerm = r.reply.Term
-		// rf.debugPrint("vote reply from server in later term %v", r.reply.Term)
 		rf.becomeFollower(r.reply.Term)
 		return
 	}
 	if r.args.Term != rf.currentTerm {
-		// rf.debugPrint("vote reply from past term %v", r.args.Term)
 		return
 	}
 	if rf.currentTerm >= r.reply.Term && r.reply.VoteGranted {
@@ -264,7 +275,6 @@ func (rf *Raft) handleVoteRequest(req voteRequest) {
 	reply.VoteGranted = false
 	// request came from old leader, reject
 	if args.Term < rf.currentTerm {
-		// rf.debugPrint("refused to vote for %v in term %v", args.CandidateId, args.Term)
 		req.reply <- &reply
 		return
 	}
@@ -280,16 +290,16 @@ func (rf *Raft) handleVoteRequest(req voteRequest) {
 	lastLogIndex := rf.lastLogIndex()
 	lastLogTerm := rf.getLog(lastLogIndex).Term
 	if lastLogTerm > args.LastLogTerm {
-		rf.debugPrint("refused to vote for %v: log term [mine: %v theirs: %v]", args.CandidateId, lastLogTerm, args.LastLogTerm)
+		rf.debugPrint("election", "refused to vote for %v: log term [mine: %v theirs: %v]", args.CandidateId, lastLogTerm, args.LastLogTerm)
 		req.reply <- &reply
 		return
 	}
 	if lastLogTerm == args.LastLogTerm && lastLogIndex > args.LastLogIndex {
-		rf.debugPrint("refused to vote for %v: log count [mine: %v theirs %v]", args.CandidateId, lastLogIndex, args.LastLogIndex)
+		rf.debugPrint("election", "refused to vote for %v: log count [mine: %v theirs %v]", args.CandidateId, lastLogIndex, args.LastLogIndex)
 		req.reply <- &reply
 		return
 	}
-	rf.debugPrint("voted for %v in term %v", args.CandidateId, args.Term)
+	rf.debugPrint("election", "voted for %v in term %v", args.CandidateId, args.Term)
 	rf.resetElectionTimer()
 	rf.votedFor = args.CandidateId
 	rf.persist()
@@ -305,13 +315,19 @@ func (rf *Raft) handleInstallRequest(req installRequest) {
 	if req.args.Term < rf.currentTerm {
 		return
 	}
+	// request came from new candidate
+	if req.args.Term > rf.currentTerm {
+		rf.becomeFollower(req.args.Term)
+		return
+	}
+	rf.resetElectionTimer()
 	lastIndex := req.args.LastIncludedIndex
 	lastTerm := req.args.LastIncludedTerm
 	// our snapshot is up to date
 	if rf.snapshot.LastIndex >= lastIndex {
 		return
 	}
-	rf.debugPrint("installing snapshot %v", lastIndex)
+	rf.debugPrint("snapshot", "installing snapshot %v", lastIndex)
 	// install snapshot
 	rf.snapshot.LastIndex = lastIndex
 	rf.snapshot.LastTerm = lastTerm
@@ -339,7 +355,7 @@ func (rf *Raft) handleSnapshotRequest(req snapshotRequest) {
 	if req.index < rf.snapshot.LastIndex {
 		return
 	}
-	rf.debugPrint("creating snapshot for index %v", req.index)
+	rf.debugPrint("snapshot", "creating snapshot for index %v", req.index)
 	rf.snapshot.LastTerm = rf.getLog(req.index).Term
 	rf.clearLogThrough(req.index)
 	rf.snapshot.LastIndex = req.index
@@ -349,7 +365,7 @@ func (rf *Raft) handleSnapshotRequest(req snapshotRequest) {
 
 func (rf *Raft) becomeFollower(term int) {
 	if rf.role != follower {
-		rf.debugPrint("became follower")
+		rf.debugPrint("role", "became follower")
 	}
 	rf.currentTerm = term
 	rf.votedFor = -1
@@ -363,7 +379,7 @@ func (rf *Raft) becomeCandidate() {
 	rf.votedFor = rf.me
 	rf.persist()
 	rf.electionVotes = 1
-	rf.debugPrint("became candidate")
+	rf.debugPrint("role", "became candidate")
 	rf.requestAllVotes()
 }
 
@@ -374,7 +390,7 @@ func (rf *Raft) becomeLeader() {
 		rf.appendLastSent[i] = time.Time{}
 	}
 	rf.role = leader
-	rf.debugPrint("became leader")
+	rf.debugPrint("role", "became leader")
 	rf.sendAllAppendRequests()
 }
 
@@ -391,14 +407,13 @@ func (rf *Raft) sendAllAppendRequests() {
 func (rf *Raft) sendOneAppendRequest(id int) {
 	lastSent := rf.appendLastSent[id]
 	if time.Since(lastSent) < heartbeatInterval {
-		return
+		// return
 	}
 	rf.appendLastSent[id] = time.Now()
 	nextIndex := rf.nextIndex[id]
 	var args AppendEntriesArgs
 
-	if nextIndex <= rf.snapshot.LastIndex || len(rf.log) == 1 {
-		// TODO: send install snapshot
+	if nextIndex <= rf.snapshot.LastIndex {
 		rf.sendInstallSnapshot(id)
 		args = AppendEntriesArgs{
 			Term:         rf.currentTerm,
@@ -408,6 +423,7 @@ func (rf *Raft) sendOneAppendRequest(id int) {
 			Entries:      []entry{},
 			LeaderCommit: rf.commitIndex,
 		}
+		return
 	} else {
 		prevLogIndex := nextIndex - 1
 		prevLogTerm := rf.getLog(prevLogIndex).Term
@@ -522,7 +538,7 @@ func (rf *Raft) commitAndApply(newCommitIndex logIndex) {
 	if newCommitIndex < startIndex {
 		return
 	}
-	rf.debugPrint("committing from %v until %v", startIndex, newCommitIndex)
+	rf.debugPrint("commit", "committing from %v until %v", startIndex, newCommitIndex)
 	for i := startIndex; i <= newCommitIndex; i++ {
 		select {
 		case rf.applyCh <- raftapi.ApplyMsg{
@@ -531,7 +547,7 @@ func (rf *Raft) commitAndApply(newCommitIndex logIndex) {
 			Command:      rf.getLog(i).Command,
 		}:
 		case <-time.After(1 * time.Second):
-			rf.debugPrint("failed to apply log %v", i)
+			rf.debugPrint("commit", "failed to apply log %v", i)
 			panic("failed to apply log")
 		}
 	}
@@ -602,11 +618,15 @@ func (rf *Raft) copyLogFrom(index logIndex) []entry {
 func (rf *Raft) setLogEntries(entries []entry, startIndex logIndex) {
 	for i, entry := range entries {
 		index := rf.logIndex(startIndex) + i
+		if index < 1 {
+			continue
+		}
 		if index >= len(rf.log) {
 			rf.log = append(rf.log, entry)
 		} else {
 			if rf.log[index].Term != entry.Term {
 				rf.debugPrint(
+					"replication",
 					"mid-append inconsistency %v leaderTerm: %v myTerm: %v",
 					index,
 					entry.Term,
@@ -661,29 +681,25 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// TODO: snapshot
 	// persister.ReadSnapshot()
 
-	rf.debugPrint("server %v created", me)
+	rf.debugPrint("server", "server %v created", me)
 	go rf.actorLoop()
 
 	return rf
 }
 
-func (rf *Raft) printLog(msg string, printValues bool) {
-	b := strings.Builder{}
-	b.WriteString("[")
-	for i, log := range rf.log {
-		index := rf.snapshot.LastIndex + logIndex(i)
-		if printValues {
-			b.WriteString(fmt.Sprintf("%v:{%v %v} ", index, log.Term, log.Command))
-		} else {
-			b.WriteString(fmt.Sprintf("%v:{%v} ", index, log.Term))
-		}
-	}
-	b.WriteString("]")
-	rf.debugPrint("%v: %v", msg, b.String())
+// Comment out a topic to keep that category out of the debug output.
+var debugTopics = map[string]bool{
+	// "client":      true,
+	"commit": true,
+	// "election":    true,
+	"replication": true,
+	"role":        true,
+	"server":      true,
+	"snapshot":    true,
 }
 
-func (rf *Raft) debugPrint(format string, a ...any) {
-	if os.Getenv("RAFT_DEBUG") != "true" {
+func (rf *Raft) debugPrint(topic string, format string, a ...any) {
+	if os.Getenv("RAFT_DEBUG") != "true" || !debugTopics[topic] {
 		return
 	}
 	t := time.Since(time.Now().Truncate(time.Hour)).Milliseconds()

@@ -86,6 +86,14 @@ func TestUnitSetLogEntries(t *testing.T) {
 			setIndex:      10,
 			want:          []entry{{0, nil}, {1, 1}, {1, 2}, {3, 3}},
 		},
+		{
+			description:   "handles out-of-bounds lower side",
+			snapshotIndex: 9,
+			log:           []entry{{0, nil}},
+			setEntries:    []entry{{1, 1}, {1, 2}, {1, 3}},
+			setIndex:      8,
+			want:          []entry{{0, nil}, {1, 3}},
+		},
 	}
 	for _, test := range testCases {
 		t.Run(test.description, func(t *testing.T) {

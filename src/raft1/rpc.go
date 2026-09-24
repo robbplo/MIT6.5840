@@ -1,13 +1,8 @@
 package raft
 
 import (
-	"time"
-
 	"6.5840/labrpc"
 )
-
-const rpcRetryDelay = 10 * time.Millisecond
-const rpcRetries = 2
 
 type AppendEntriesArgs struct {
 	Term         int
@@ -34,21 +29,16 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 func (rf *Raft) AppendEntriesRPC(serverId int, args AppendEntriesArgs) {
 	go func() {
-		attempts := 0
-		for attempts <= rpcRetries {
-			attempts++
-			reply := AppendEntriesReply{}
-			ok := rf.peers[serverId].Call("Raft.AppendEntries", args, &reply)
-			if ok {
-				rf.appendReplies <- appendReply{
-					ok:       true,
-					serverId: serverId,
-					args:     args,
-					reply:    reply,
-				}
-				return
+		reply := AppendEntriesReply{}
+		ok := rf.peers[serverId].Call("Raft.AppendEntries", args, &reply)
+		if ok {
+			rf.appendReplies <- appendReply{
+				ok:       true,
+				serverId: serverId,
+				args:     args,
+				reply:    reply,
 			}
-			time.Sleep(rpcRetryDelay)
+			return
 		}
 		rf.appendReplies <- appendReply{
 			ok:       false,
@@ -78,16 +68,11 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 func (rf *Raft) RequestVoteRPC(server *labrpc.ClientEnd, args RequestVoteArgs) {
 	go func() {
-		attempts := 0
-		for attempts <= rpcRetries {
-			attempts++
-			reply := RequestVoteReply{}
-			ok := server.Call("Raft.RequestVote", args, &reply)
-			if ok {
-				rf.voteReplies <- voteReply{ok: true, args: args, reply: reply}
-				return
-			}
-			time.Sleep(rpcRetryDelay)
+		reply := RequestVoteReply{}
+		ok := server.Call("Raft.RequestVote", args, &reply)
+		if ok {
+			rf.voteReplies <- voteReply{ok: true, args: args, reply: reply}
+			return
 		}
 		rf.voteReplies <- voteReply{ok: false, args: args}
 	}()
@@ -113,16 +98,11 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 
 func (rf *Raft) InstallSnapshotRPC(serverId int, args *InstallSnapshotArgs) {
 	go func() {
-		attempts := 0
-		for attempts <= rpcRetries {
-			attempts++
-			reply := InstallSnapshotReply{}
-			ok := rf.peers[serverId].Call("Raft.InstallSnapshot", args, &reply)
-			if ok {
-				rf.installReplies <- installReply{ok: true, serverId: serverId, args: args, reply: reply}
-				return
-			}
-			time.Sleep(rpcRetryDelay)
+		reply := InstallSnapshotReply{}
+		ok := rf.peers[serverId].Call("Raft.InstallSnapshot", args, &reply)
+		if ok {
+			rf.installReplies <- installReply{ok: true, serverId: serverId, args: args, reply: reply}
+			return
 		}
 		rf.installReplies <- installReply{ok: false, serverId: serverId, args: args}
 	}()
