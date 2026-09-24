@@ -14,6 +14,7 @@ import (
 	"os"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"6.5840/labgob"
@@ -413,7 +414,7 @@ func (rf *Raft) sendOneAppendRequest(id int) {
 	nextIndex := rf.nextIndex[id]
 	var args AppendEntriesArgs
 
-	if nextIndex <= rf.snapshot.LastIndex {
+	if rf.snapshot.LastIndex > 0 && nextIndex <= rf.snapshot.LastIndex {
 		rf.sendInstallSnapshot(id)
 		args = AppendEntriesArgs{
 			Term:         rf.currentTerm,
@@ -541,15 +542,10 @@ func (rf *Raft) commitAndApply(newCommitIndex logIndex) {
 	}
 	rf.debugPrint("commit", "committing from %v until %v", startIndex, newCommitIndex)
 	for i := startIndex; i <= newCommitIndex; i++ {
-		select {
-		case rf.applyCh <- raftapi.ApplyMsg{
+		rf.applyCh <- raftapi.ApplyMsg{
 			CommandValid: true,
 			CommandIndex: int(i),
 			Command:      rf.getLog(i).Command,
-		}:
-		case <-time.After(1 * time.Second):
-			rf.debugPrint("commit", "failed to apply log %v", i)
-			panic("failed to apply log")
 		}
 	}
 	rf.commitIndex = newCommitIndex
@@ -640,6 +636,24 @@ func (rf *Raft) setLogEntries(entries []entry, startIndex logIndex) {
 	}
 }
 
+func applicationWorker(in chan raftapi.ApplyMsg, out chan raftapi.ApplyMsg) {
+	q := make([]raftapi.ApplyMsg, 64)
+	for in != nil || len(q) > 0 {
+		var next raftapi.ApplyMsg
+		var sendOut chan raftapi.ApplyMsg
+		if len(q) > 0 {
+			sendOut = out
+			next = q[0]
+		}
+		select {
+		case msg := <-in:
+			q = append(q, msg)
+		case sendOut<-next:
+			q = q[1:]
+		}
+	}
+}
+
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
 // server's port is peers[me]. all the servers' peers[] arrays
@@ -660,28 +674,28 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.nextIndex = make([]logIndex, len(rf.peers))
 	rf.matchIndex = make([]logIndex, len(rf.peers))
 	rf.appendLastSent = make([]time.Time, len(rf.peers))
-	rf.applyCh = applyCh
+	rf.applyCh = make(chan raftapi.ApplyMsg)
 	rf.heartbeatTicker = time.NewTicker(heartbeatInterval)
 	rf.electionTimer = time.NewTimer(1 * time.Second)
 	rf.resetElectionTimer()
 
-	rf.startRequests = make(chan startRequest, 1)
-	// TODO: prevent blocking in the actor loop
-	// send to applyCh in another goroutine?
-	rf.snapshotRequests = make(chan snapshotRequest, 10)
-	rf.stateRequests = make(chan stateRequest, 1)
-	rf.appendRequests = make(chan appendRequest, 1)
-	rf.appendReplies = make(chan appendReply, 1)
-	rf.voteRequests = make(chan voteRequest, 1)
-	rf.voteReplies = make(chan voteReply, 1)
-	rf.installRequests = make(chan installRequest, 1)
-	rf.installReplies = make(chan installReply, 1)
+	rf.startRequests = make(chan startRequest)
+	rf.snapshotRequests = make(chan snapshotRequest)
+	rf.stateRequests = make(chan stateRequest)
+	rf.appendRequests = make(chan appendRequest)
+	rf.appendReplies = make(chan appendReply)
+	rf.voteRequests = make(chan voteRequest)
+	rf.voteReplies = make(chan voteReply)
+	rf.installRequests = make(chan installRequest)
+	rf.installReplies = make(chan installReply)
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState(), persister.ReadSnapshot())
 
 	rf.debugPrint("server", "server %v created", me)
+
 	go rf.actorLoop()
+	go applicationWorker(rf.applyCh, applyCh)
 
 	return rf
 }
@@ -705,15 +719,15 @@ func (rf *Raft) debugPrint(topic string, format string, a ...any) {
 		return
 	}
 	t := time.Since(time.Now().Truncate(time.Hour)).Milliseconds()
-	role := "follower"
+	role := "follower "
 	switch rf.role {
 	case leader:
-		role = "leader"
+		role = "leader   "
 	case candidate:
 		role = "candidate"
 	}
 	part1 := fmt.Sprintf(
-		"[%v] %v %v\tterm:%v snap:%v log:%v/%v commit:%v last:{%v %v}",
+		"[%v] %v %v  term:%v snap:%v log:%v/%v commit:%v last:{%v %v}",
 		t,
 		role,
 		rf.me,
@@ -725,7 +739,8 @@ func (rf *Raft) debugPrint(topic string, format string, a ...any) {
 		rf.getLog(rf.lastLogIndex()).Term,
 		rf.getLog(rf.lastLogIndex()).Command,
 	)
-	debugLen = max(debugLen, len(part1)+1)
+	debugLen = max(debugLen, len(part1))
+	spaces := strings.Repeat(" ", debugLen - len(part1))
 
 	part2 := fmt.Sprintf(format, a...)
 	tester.Annotate(
@@ -733,5 +748,5 @@ func (rf *Raft) debugPrint(topic string, format string, a ...any) {
 		part2,
 		role+part1,
 	)
-	fmt.Printf("%-*v %v\n", debugLen+1, part1, part2)
+	fmt.Printf("%v %v %v\n", part1, spaces, part2)
 }
