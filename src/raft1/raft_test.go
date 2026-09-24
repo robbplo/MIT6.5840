@@ -1274,7 +1274,7 @@ func TestSnapshotInstall3D(t *testing.T) {
 }
 
 func TestSnapshotInstallUnreliable3D(t *testing.T) {
-	snapcommon(t, "Test (3D): install snapshots (disconnect)",
+	snapcommon(t, "Test (3D): install snapshots (disconnect, unreliable)",
 		true, false, false)
 }
 
@@ -1283,7 +1283,7 @@ func TestSnapshotInstallCrash3D(t *testing.T) {
 }
 
 func TestSnapshotInstallUnCrash3D(t *testing.T) {
-	snapcommon(t, "Test (3D): install snapshots (crash)", false, false, true)
+	snapcommon(t, "Test (3D): install snapshots (crash, unreliable)", false, false, true)
 }
 
 // do the servers persist the snapshots, and

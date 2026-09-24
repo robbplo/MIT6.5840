@@ -40,7 +40,7 @@ const electionTimeoutRandom = 200
 // the leader.
 func (rf *Raft) Start(command any) (int, int, bool) {
 	r := make(chan startReply)
-	rf.startRequests <- startReq{command: command, reply: r}
+	rf.startRequests <- startRequest{command: command, reply: r}
 	reply := <-r
 
 	return int(reply.index), reply.term, reply.isLeader
@@ -51,7 +51,10 @@ func (rf *Raft) Start(command any) (int, int, bool) {
 // service no longer needs the log through (and including)
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
-	rf.snapshotRequests <- snapshotReq{index: logIndex(index), snapshot: snapshot}
+	rf.snapshotRequests <- snapshotRequest{
+		index:    logIndex(index),
+		snapshot: slices.Clone(snapshot),
+	}
 }
 
 // how many bytes in Raft's persisted log?
@@ -67,6 +70,8 @@ func (rf *Raft) actorLoop() {
 			rf.handleStartRequest(req)
 		case rep := <-rf.appendReplies:
 			rf.handleAppendReply(rep)
+		case rep := <-rf.installReplies:
+			rf.handleInstallReply(rep)
 		case <-rf.heartbeatTicker.C:
 			if rf.role == leader {
 				rf.sendAllAppendRequests()
@@ -84,6 +89,8 @@ func (rf *Raft) actorLoop() {
 			rf.handleAppendRequest(req)
 		case req := <-rf.voteRequests:
 			rf.handleVoteRequest(req)
+		case req := <-rf.installRequests:
+			rf.handleInstallRequest(req)
 		// all
 		case req := <-rf.snapshotRequests:
 			rf.handleSnapshotRequest(req)
@@ -94,12 +101,12 @@ func (rf *Raft) actorLoop() {
 	}
 }
 
-func (rf *Raft) handleStartRequest(req startReq) {
+func (rf *Raft) handleStartRequest(req startRequest) {
 	if rf.role != leader {
 		req.reply <- startReply{isLeader: false, index: rf.lastLogIndex(), term: rf.currentTerm}
 		return
 	}
-	// rf.debugPrint("start command: %v nextIndex: %v", req.command, rf.nextIndex)
+	rf.debugPrint("start command: %v nextIndex: %v", req.command, rf.nextIndex)
 	rf.log = append(rf.log, entry{Command: req.command, Term: rf.currentTerm})
 	rf.persist()
 	rf.sendAllAppendRequests()
@@ -146,14 +153,22 @@ func (rf *Raft) handleAppendReply(r appendReply) {
 	} else {
 		termStartIndex := rf.findTermStartIndex(r.reply.ConflictTerm)
 		if termStartIndex == -1 {
-			rf.debugPrint("setting next index to conflict index: %v", r.reply.ConflictIndex)
+			rf.debugPrint("setting nextIndex[%v] to conflict index: %v", r.serverId, r.reply.ConflictIndex)
 			rf.nextIndex[r.serverId] = max(r.reply.ConflictIndex, rf.snapshot.LastIndex+1)
 		} else {
-			rf.debugPrint("setting next index to term start index: %v", termStartIndex)
+			rf.debugPrint("setting nextIndex[%v] to term start index: %v", r.serverId, termStartIndex)
 			rf.nextIndex[r.serverId] = max(termStartIndex, rf.snapshot.LastIndex+1)
 		}
 	}
 	rf.sendOneAppendRequest(r.serverId)
+}
+
+func (rf *Raft) handleInstallReply(rep installReply) {
+	if !rep.ok {
+		return
+	}
+	rf.nextIndex[rep.serverId] = rep.args.LastIncludedIndex + 1
+	rf.matchIndex[rep.serverId] = rep.args.LastIncludedIndex
 }
 
 func (rf *Raft) handleAppendRequest(req appendRequest) {
@@ -207,11 +222,9 @@ func (rf *Raft) handleAppendRequest(req appendRequest) {
 	// if an existing entry conflicts with a new one (same index, different terms)
 	// delete the exsiting entry and all that follow it
 	reply.Success = true
-	rf.setLogEntries(args.Entries, args.PrevLogIndex+1)
 
 	if len(args.Entries) > 0 {
 		rf.persist()
-		rf.debugPrint("appended logs: %v", len(args.Entries))
 	}
 
 	if args.LeaderCommit > rf.commitIndex {
@@ -283,8 +296,49 @@ func (rf *Raft) handleVoteRequest(req voteRequest) {
 	req.reply <- &reply
 }
 
-func (rf *Raft) handleSnapshotRequest(req snapshotReq) {
-	rf.debugPrint("\ncreating snapshot for index %v", req.index)
+func (rf *Raft) handleInstallRequest(req installRequest) {
+	defer func() {
+		req.reply <- InstallSnapshotReply{Term: rf.currentTerm}
+	}()
+	// request came from old leader, reject
+	if req.args.Term < rf.currentTerm {
+		return
+	}
+	lastIndex := req.args.LastIncludedIndex
+	lastTerm := req.args.LastIncludedTerm
+	// our snapshot is up to date
+	if rf.snapshot.LastIndex >= lastIndex {
+		return
+	}
+	rf.debugPrint("installing snapshot %v", lastIndex)
+	// install snapshot
+	rf.snapshot.LastIndex = lastIndex
+	rf.snapshot.LastTerm = lastTerm
+	rf.snapshot.Data = req.args.Data
+	rf.commitIndex = lastIndex
+	// clear logs covered by snapshot
+	// if last log is found and term matches snapshot
+	if lastIndex >= rf.lastLogIndex() && rf.getLog(lastIndex).Term == lastTerm {
+		// retain log entries following last log from snapshot
+		rf.clearLogThrough(lastIndex)
+	} else {
+		// otherwise, discard entire log
+		rf.log = []entry{{0, nil}}
+	}
+	// send snapshot to application
+	rf.applyCh <- raftapi.ApplyMsg{
+		SnapshotValid: true,
+		Snapshot:      req.args.Data,
+		SnapshotIndex: int(lastIndex),
+		SnapshotTerm:  lastTerm,
+	}
+}
+
+func (rf *Raft) handleSnapshotRequest(req snapshotRequest) {
+	if req.index < rf.snapshot.LastIndex {
+		return
+	}
+	rf.debugPrint("creating snapshot for index %v", req.index)
 	rf.snapshot.LastTerm = rf.getLog(req.index).Term
 	rf.clearLogThrough(req.index)
 	rf.snapshot.LastIndex = req.index
@@ -344,7 +398,7 @@ func (rf *Raft) sendOneAppendRequest(id int) {
 
 	if nextIndex <= rf.snapshot.LastIndex || len(rf.log) == 1 {
 		// TODO: send install snapshot
-		rf.debugPrint("not sending any logs, gone from snapshot")
+		rf.sendInstallSnapshot(id)
 		args = AppendEntriesArgs{
 			Term:         rf.currentTerm,
 			LeaderId:     rf.me,
@@ -373,6 +427,18 @@ func (rf *Raft) sendOneAppendRequest(id int) {
 	rf.AppendEntriesRPC(id, args)
 }
 
+func (rf *Raft) sendInstallSnapshot(serverId int) {
+	args := InstallSnapshotArgs{
+		Term:              rf.currentTerm,
+		LeaderId:          rf.me,
+		LastIncludedIndex: rf.snapshot.LastIndex,
+		LastIncludedTerm:  rf.snapshot.LastTerm,
+		Data:              rf.snapshot.Data,
+	}
+
+	rf.InstallSnapshotRPC(serverId, &args)
+}
+
 func (rf *Raft) requestAllVotes() {
 	for id, srv := range rf.peers {
 		if id == rf.me {
@@ -393,7 +459,7 @@ func (rf *Raft) requestAllVotes() {
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
-	req := stateReq{reply: make(chan stateReply)}
+	req := stateRequest{reply: make(chan stateReply)}
 	rf.stateRequests <- req
 	state := <-req.reply
 
@@ -500,11 +566,21 @@ func (rf *Raft) findTermStartIndex(term int) logIndex {
 
 // Delete all log entries after `index` exclusive
 func (rf *Raft) clearLogAfter(index logIndex) {
+	if index > rf.lastLogIndex() {
+		return
+	}
+	if index <= rf.snapshot.LastIndex {
+		rf.log = []entry{{0, nil}}
+		return
+	}
 	rf.log = rf.log[:rf.logIndex(index)+1]
 }
 
 // Delete log entries from start until `index` inclusive
 func (rf *Raft) clearLogThrough(index logIndex) {
+	if index <= rf.snapshot.LastIndex || index > rf.lastLogIndex() {
+		return
+	}
 	newLog := rf.log[rf.logIndex(index)+1:]
 	for i, entry := range newLog {
 		rf.log[i+1] = entry
@@ -564,14 +640,17 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.electionTimer = time.NewTimer(1 * time.Second)
 	rf.resetElectionTimer()
 
-	rf.startRequests = make(chan startReq, 1)
-	// TODO: figure out why this needs a bigger buffer
-	rf.snapshotRequests = make(chan snapshotReq, 10)
-	rf.stateRequests = make(chan stateReq, 1)
+	rf.startRequests = make(chan startRequest, 1)
+	// TODO: prevent blocking in the actor loop
+	// send to applyCh in another goroutine?
+	rf.snapshotRequests = make(chan snapshotRequest, 10)
+	rf.stateRequests = make(chan stateRequest, 1)
 	rf.appendRequests = make(chan appendRequest, 1)
 	rf.appendReplies = make(chan appendReply, 1)
 	rf.voteRequests = make(chan voteRequest, 1)
 	rf.voteReplies = make(chan voteReply, 1)
+	rf.installRequests = make(chan installRequest, 1)
+	rf.installReplies = make(chan installReply, 1)
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())

@@ -92,3 +92,38 @@ func (rf *Raft) RequestVoteRPC(server *labrpc.ClientEnd, args RequestVoteArgs) {
 		rf.voteReplies <- voteReply{ok: false, args: args}
 	}()
 }
+
+type InstallSnapshotArgs struct {
+	Term              int
+	LeaderId          int
+	LastIncludedIndex logIndex
+	LastIncludedTerm  int
+	Data              []byte
+}
+
+type InstallSnapshotReply struct {
+	Term int
+}
+
+func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
+	r := make(chan InstallSnapshotReply)
+	rf.installRequests <- installRequest{args: args, reply: r}
+	*reply = <-r
+}
+
+func (rf *Raft) InstallSnapshotRPC(serverId int, args *InstallSnapshotArgs) {
+	go func() {
+		attempts := 0
+		for attempts <= rpcRetries {
+			attempts++
+			reply := InstallSnapshotReply{}
+			ok := rf.peers[serverId].Call("Raft.InstallSnapshot", args, &reply)
+			if ok {
+				rf.installReplies <- installReply{ok: true, serverId: serverId, args: args, reply: reply}
+				return
+			}
+			time.Sleep(rpcRetryDelay)
+		}
+		rf.installReplies <- installReply{ok: false, serverId: serverId, args: args}
+	}()
+}

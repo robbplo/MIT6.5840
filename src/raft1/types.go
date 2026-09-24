@@ -36,15 +36,18 @@ type Raft struct {
 	heartbeatTicker *time.Ticker // leader heartbeat ticker
 
 	// actor request and reply channels
-	startRequests    chan startReq
-	snapshotRequests chan snapshotReq
-	stateRequests    chan stateReq
+	startRequests    chan startRequest
+	snapshotRequests chan snapshotRequest
+	stateRequests    chan stateRequest
 
 	appendRequests chan appendRequest
 	appendReplies  chan appendReply
 
 	voteRequests chan voteRequest
 	voteReplies  chan voteReply
+
+	installRequests chan installRequest
+	installReplies  chan installReply
 }
 
 type role uint8
@@ -55,12 +58,12 @@ const (
 	leader
 )
 
-// Index of a log entry. This includes the last snapshot index.
+// Index of a log entry, which includes the snapshot index.
 type logIndex int
 
 type entry struct {
 	Term    int
-	Command any
+	Command any // considered to be immutable for concurrency purposes
 }
 
 type snapshot struct {
@@ -69,7 +72,7 @@ type snapshot struct {
 	Data      []byte
 }
 
-type startReq struct {
+type startRequest struct {
 	command any
 	reply   chan startReply
 }
@@ -80,12 +83,12 @@ type startReply struct {
 	term     int
 }
 
-type snapshotReq struct {
+type snapshotRequest struct {
 	index    logIndex
 	snapshot []byte
 }
 
-type stateReq struct {
+type stateRequest struct {
 	reply chan stateReply
 }
 
@@ -115,4 +118,16 @@ type voteReply struct {
 	ok    bool
 	args  RequestVoteArgs
 	reply RequestVoteReply
+}
+
+type installRequest struct {
+	args  *InstallSnapshotArgs
+	reply chan InstallSnapshotReply
+}
+
+type installReply struct {
+	ok       bool
+	serverId int
+	args     *InstallSnapshotArgs
+	reply    InstallSnapshotReply
 }
