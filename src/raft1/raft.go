@@ -125,11 +125,8 @@ func (rf *Raft) handleAppendReply(r appendReply) {
 	}
 	if r.reply.Success {
 		lastIndex := r.args.PrevLogIndex + logIndex(len(r.args.Entries))
-		if lastIndex+1 < rf.nextIndex[r.serverId] {
-			rf.debugPrint("inconsistency", "regression in nextIndex")
-		}
 		rf.nextIndex[r.serverId] = lastIndex + 1
-		// update matchIndex only if the replicated log was from my term
+		// update matchIndex only if the replicated log was from currentTerm
 		// so that we never commit entry from previous term (figure 8)
 		if rf.getLog(lastIndex).Term == rf.currentTerm {
 			rf.matchIndex[rf.me] = rf.lastLogIndex()
