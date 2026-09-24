@@ -43,7 +43,7 @@ func (rf *Raft) Start(command any) (int, int, bool) {
 	rf.startRequests <- startReq{command: command, reply: r}
 	reply := <-r
 
-	return reply.index, reply.term, reply.isLeader
+	return int(reply.index), reply.term, reply.isLeader
 }
 
 // the service says it has created a snapshot that has
@@ -51,7 +51,7 @@ func (rf *Raft) Start(command any) (int, int, bool) {
 // service no longer needs the log through (and including)
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
-	rf.snapshotRequests <- snapshotReq{index: index, snapshot: snapshot}
+	rf.snapshotRequests <- snapshotReq{index: logIndex(index), snapshot: snapshot}
 }
 
 // how many bytes in Raft's persisted log?
@@ -118,7 +118,7 @@ func (rf *Raft) handleAppendReply(r appendReply) {
 		return
 	}
 	if r.reply.Success {
-		lastIndex := r.args.PrevLogIndex + len(r.args.Entries)
+		lastIndex := r.args.PrevLogIndex + logIndex(len(r.args.Entries))
 		rf.nextIndex[r.serverId] = lastIndex + 1
 		// update matchIndex only if the replicated log was from my term
 		// so that we never commit entry from previous term (figure 8)
@@ -129,7 +129,7 @@ func (rf *Raft) handleAppendReply(r appendReply) {
 		// rf.debugPrint("ok append reply from %v, matchIndex: %v", r.serverId, rf.matchIndex)
 		// check if new commit
 		majority := (len(rf.peers) + 1) / 2
-		matches := make([]int, len(rf.matchIndex))
+		matches := make([]logIndex, len(rf.matchIndex))
 		copy(matches, rf.matchIndex)
 		slices.Sort(matches)
 		N := matches[majority-1]
@@ -140,7 +140,7 @@ func (rf *Raft) handleAppendReply(r appendReply) {
 	}
 	// Deleting too many logs via next index?
 	if r.reply.ConflictTerm == 0 {
-		rf.nextIndex[r.serverId] = r.reply.LogLen
+		rf.nextIndex[r.serverId] = r.reply.LastLogIndex
 	} else {
 		termStartIndex := rf.findTermStartIndex(r.reply.ConflictTerm)
 		if termStartIndex == -1 {
@@ -160,7 +160,7 @@ func (rf *Raft) handleAppendRequest(req appendRequest) {
 
 	reply.Term = rf.currentTerm
 	reply.Success = false
-	reply.LogLen = rf.lastLogIndex()
+	reply.LastLogIndex = rf.lastLogIndex()
 	// request came from old leader, reject
 	if args.Term < rf.currentTerm {
 		// rf.debugPrint("rejecting append from term %v", args.Term)
@@ -174,7 +174,7 @@ func (rf *Raft) handleAppendRequest(req appendRequest) {
 	}
 
 	// log inconsistency checks
-	if args.PrevLogIndex > reply.LogLen {
+	if args.PrevLogIndex > reply.LastLogIndex {
 		rf.debugPrint("prev log %v not found, requesting more", args.PrevLogIndex)
 		req.reply <- &reply
 		return
@@ -450,7 +450,7 @@ func (rf *Raft) readPersist(data []byte) {
 	}
 }
 
-func (rf *Raft) commitAndApply(newCommitIndex int) {
+func (rf *Raft) commitAndApply(newCommitIndex logIndex) {
 	// skip dummy log at index 0
 	startIndex := rf.commitIndex + 1
 	rf.debugPrint("committing from %v until %v", startIndex, newCommitIndex)
@@ -458,10 +458,9 @@ func (rf *Raft) commitAndApply(newCommitIndex int) {
 		select {
 		case rf.applyCh <- raftapi.ApplyMsg{
 			CommandValid: true,
-			CommandIndex: i,
+			CommandIndex: int(i),
 			Command:      rf.getLog(i).Command,
 		}:
-		//
 		case <-time.After(1 * time.Second):
 			rf.debugPrint("failed to apply log %v", i)
 			panic("failed to apply log")
@@ -470,18 +469,18 @@ func (rf *Raft) commitAndApply(newCommitIndex int) {
 	rf.commitIndex = newCommitIndex
 }
 
-// Snapshot-aware log functions. Indexes given and returned include snapshotted logs.
-func (rf *Raft) logIndex(index int) int {
-	return index - rf.snapshot.LastIndex
+// Convert a `logIndex` to an int which can be used to index `rf.log`
+func (rf *Raft) logIndex(index logIndex) int {
+	return int(index - rf.snapshot.LastIndex)
 }
 
 // Index of the last log, including snapshot
-func (rf *Raft) lastLogIndex() int {
-	return rf.snapshot.LastIndex + len(rf.log) - 1
+func (rf *Raft) lastLogIndex() logIndex {
+	return rf.snapshot.LastIndex + logIndex(len(rf.log)-1)
 }
 
 // Get a log entry
-func (rf *Raft) getLog(index int) entry {
+func (rf *Raft) getLog(index logIndex) entry {
 	if index <= rf.snapshot.LastIndex {
 		return entry{Term: rf.snapshot.LastTerm}
 	}
@@ -490,10 +489,10 @@ func (rf *Raft) getLog(index int) entry {
 
 // Find the index of the first log entry for `term`
 // Returns -1 if there is no such entry
-func (rf *Raft) findTermStartIndex(term int) int {
+func (rf *Raft) findTermStartIndex(term int) logIndex {
 	for i, log := range rf.log {
 		if log.Term == term {
-			return rf.snapshot.LastIndex + i
+			return rf.snapshot.LastIndex + logIndex(i)
 		}
 	}
 	return -1
@@ -501,13 +500,13 @@ func (rf *Raft) findTermStartIndex(term int) int {
 }
 
 // Delete all log entries after `index` exclusive
-func (rf *Raft) clearLogAfter(index int) {
+func (rf *Raft) clearLogAfter(index logIndex) {
 	// TODO: ensure there are no references
 	rf.log = rf.log[:rf.logIndex(index)+1]
 }
 
 // Delete log entries from start until `index` inclusive
-func (rf *Raft) clearLogThrough(index int) {
+func (rf *Raft) clearLogThrough(index logIndex) {
 	// TODO: ensure there are no references
 	log := slices.Clone(rf.log[rf.logIndex(index)+1:])
 	rf.log = []entry{{0, nil}}
@@ -515,14 +514,14 @@ func (rf *Raft) clearLogThrough(index int) {
 }
 
 // Create a copy of the log starting at `index`, inclusive until the end
-func (rf *Raft) copyLogFrom(index int) []entry {
+func (rf *Raft) copyLogFrom(index logIndex) []entry {
 	return slices.Clone(rf.log[rf.logIndex(index):])
 }
 
 // Insert log entries starting at a given index
-func (rf *Raft) setLogEntries(entries []entry, startIndex int) {
+func (rf *Raft) setLogEntries(entries []entry, startIndex logIndex) {
 	for i, entry := range entries {
-		index := rf.logIndex(startIndex + i)
+		index := startIndex + logIndex(i)
 		if index > rf.lastLogIndex() {
 			rf.log = append(rf.log, entry)
 		} else {
@@ -557,8 +556,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 	rf.role = follower
 	rf.log = []entry{{Term: 0, Command: nil}}
-	rf.nextIndex = make([]int, len(rf.peers))
-	rf.matchIndex = make([]int, len(rf.peers))
+	rf.nextIndex = make([]logIndex, len(rf.peers))
+	rf.matchIndex = make([]logIndex, len(rf.peers))
 	rf.appendLastSent = make([]time.Time, len(rf.peers))
 	rf.applyCh = applyCh
 	rf.heartbeatTicker = time.NewTicker(heartbeatInterval)
@@ -589,7 +588,7 @@ func (rf *Raft) printLog(msg string, printValues bool) {
 	b := strings.Builder{}
 	b.WriteString("[")
 	for i, log := range rf.log {
-		index := rf.snapshot.LastIndex + i
+		index := rf.snapshot.LastIndex + logIndex(i)
 		if printValues {
 			b.WriteString(fmt.Sprintf("%v:{%v %v} ", index, log.Term, log.Command))
 		} else {
@@ -621,7 +620,7 @@ func (rf *Raft) debugPrint(format string, a ...any) {
 		rf.currentTerm,
 		rf.snapshot.LastIndex,
 		len(rf.log)-1,
-		rf.snapshot.LastIndex+len(rf.log)-1,
+		int(rf.snapshot.LastIndex)+len(rf.log)-1,
 		rf.commitIndex,
 		rf.getLog(rf.lastLogIndex()),
 	)

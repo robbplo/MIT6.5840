@@ -12,18 +12,18 @@ const rpcRetries = 2
 type AppendEntriesArgs struct {
 	Term         int
 	LeaderId     int
-	PrevLogIndex int
+	PrevLogIndex logIndex
 	PrevLogTerm  int
 	Entries      []entry
-	LeaderCommit int
+	LeaderCommit logIndex
 }
 
 type AppendEntriesReply struct {
 	Term          int
 	Success       bool
-	LogLen        int // length of the follower's log
-	ConflictTerm  int // term where conflict occurred, 0 if no conflict
-	ConflictIndex int // index of the first entry with conflicting term
+	LastLogIndex  logIndex // length of the follower's log
+	ConflictTerm  int      // term where conflict occurred, 0 if no conflict
+	ConflictIndex logIndex // index of the first entry with conflicting term
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -61,7 +61,7 @@ func (rf *Raft) AppendEntriesRPC(serverId int, args AppendEntriesArgs) {
 type RequestVoteArgs struct {
 	Term         int
 	CandidateId  int
-	LastLogIndex int
+	LastLogIndex logIndex
 	LastLogTerm  int
 }
 

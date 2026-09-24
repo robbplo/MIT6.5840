@@ -19,11 +19,11 @@ type Raft struct {
 	log         []entry
 	snapshot    snapshot
 
-	commitIndex int // highest entry known committed (init 0, monotonic)
-	lastApplied int // highest entry applied to the state machine (init 0, monotonic)
+	commitIndex logIndex // highest entry known committed (init 0, monotonic)
+	lastApplied logIndex // highest entry applied to the state machine (init 0, monotonic)
 
-	nextIndex      []int // per server, next entry to send (init leader last log index + 1)
-	matchIndex     []int // per server, highest entry known replicated (init 0, monotonic)
+	nextIndex      []logIndex // per server, next entry to send (init leader last log index + 1)
+	matchIndex     []logIndex // per server, highest entry known replicated (init 0, monotonic)
 	appendLastSent []time.Time
 
 	role    role
@@ -55,13 +55,16 @@ const (
 	leader
 )
 
+// Index of a log entry. This includes the last snapshot index.
+type logIndex int
+
 type entry struct {
 	Term    int
 	Command any
 }
 
 type snapshot struct {
-	LastIndex int
+	LastIndex logIndex
 	LastTerm  int
 	Data      []byte
 }
@@ -73,12 +76,12 @@ type startReq struct {
 
 type startReply struct {
 	isLeader bool
-	index    int
+	index    logIndex
 	term     int
 }
 
 type snapshotReq struct {
-	index    int
+	index    logIndex
 	snapshot []byte
 }
 
