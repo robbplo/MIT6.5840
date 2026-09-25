@@ -176,7 +176,7 @@ func (rf *Raft) handleInstallReply(rep installReply) {
 	}
 	id := rep.serverId
 	rf.nextIndex[id] = max(rf.nextIndex[id], rep.args.LastIncludedIndex+1)
-	rf.matchIndex[id] = max(rf.nextIndex[id], rep.args.LastIncludedIndex)
+	rf.matchIndex[id] = max(rf.matchIndex[id], rep.args.LastIncludedIndex)
 
 	rf.debugPrint(
 		"replication",
