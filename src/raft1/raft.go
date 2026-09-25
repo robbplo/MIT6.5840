@@ -130,7 +130,7 @@ func (rf *Raft) handleAppendReply(r appendReply) {
 		rf.nextIndex[r.serverId] = lastIndex + 1
 		// update matchIndex only if the replicated log was from currentTerm
 		// so that we never commit entry from previous term (figure 8)
-		if rf.getLog(lastIndex).Term == rf.currentTerm {
+		if rf.getLogTerm(lastIndex) == rf.currentTerm {
 			rf.matchIndex[rf.me] = rf.lastLogIndex()
 			rf.matchIndex[r.serverId] = lastIndex
 		}
@@ -177,7 +177,14 @@ func (rf *Raft) handleInstallReply(rep installReply) {
 	id := rep.serverId
 	rf.nextIndex[id] = max(rf.nextIndex[id], rep.args.LastIncludedIndex+1)
 	rf.matchIndex[id] = max(rf.nextIndex[id], rep.args.LastIncludedIndex)
-	rf.debugPrint("replication", "install reply from %v for snapshot %v", rep.serverId, rep.args.LastIncludedIndex)
+
+	rf.debugPrint(
+		"replication",
+		"install reply from %v for snapshot %v matchIndex: %v",
+		rep.serverId,
+		rep.args.LastIncludedIndex,
+		rf.matchIndex,
+	)
 }
 
 func (rf *Raft) handleAppendRequest(req appendRequest) {
@@ -206,10 +213,10 @@ func (rf *Raft) handleAppendRequest(req appendRequest) {
 
 	// if the previous log entry does not match the leader, replace all logs of the wrong term
 	// find term start index and request more logs
-	myPrevLogTerm := rf.getLog(args.PrevLogIndex).Term
+	myPrevLogTerm := rf.getLogTerm(args.PrevLogIndex)
 	if myPrevLogTerm != args.PrevLogTerm {
 		conflictIndex := args.PrevLogIndex
-		for conflictIndex > rf.snapshot.LastIndex && rf.getLog(conflictIndex).Term == myPrevLogTerm {
+		for conflictIndex > rf.snapshot.LastIndex && rf.getLogTerm(conflictIndex) == myPrevLogTerm {
 			conflictIndex--
 		}
 		conflictIndex++
@@ -234,15 +241,20 @@ func (rf *Raft) handleAppendRequest(req appendRequest) {
 	if len(args.Entries) > 0 {
 		rf.setLogEntries(args.Entries, args.PrevLogIndex+1)
 		rf.persist()
-		rf.debugPrint(
-			"replication",
-			"set logs %v through %v",
-			args.PrevLogIndex+1,
-			int(args.PrevLogIndex)+1+len(args.Entries),
-		)
+		if len(args.Entries) == 1 {
+			rf.debugPrint("replication", "set log %v", args.PrevLogIndex+1)
+		} else {
+			rf.debugPrint(
+				"replication",
+				"set logs %v through %v",
+				args.PrevLogIndex+1,
+				int(args.PrevLogIndex)+len(args.Entries),
+			)
+		}
+
 	}
 
-	if args.LeaderCommit > rf.commitIndex && rf.getLog(rf.lastLogIndex()).Term == rf.currentTerm {
+	if args.LeaderCommit > rf.commitIndex && rf.getLogTerm(rf.lastLogIndex()) == rf.currentTerm {
 		rf.commitAndApply(min(args.LeaderCommit, rf.lastLogIndex()))
 	}
 	req.reply <- &reply
@@ -289,7 +301,7 @@ func (rf *Raft) handleVoteRequest(req voteRequest) {
 	}
 	// grant vote if candidate's log is at least as up-to-date as own log
 	lastLogIndex := rf.lastLogIndex()
-	lastLogTerm := rf.getLog(lastLogIndex).Term
+	lastLogTerm := rf.getLogTerm(lastLogIndex)
 	if lastLogTerm > args.LastLogTerm {
 		rf.debugPrint("election", "refused to vote for %v: log term [mine: %v theirs: %v]", args.CandidateId, lastLogTerm, args.LastLogTerm)
 		req.reply <- &reply
@@ -336,7 +348,7 @@ func (rf *Raft) handleInstallRequest(req installRequest) {
 	rf.commitIndex = lastIndex
 	// clear logs covered by snapshot
 	// if last log is found and term matches snapshot
-	if lastIndex >= rf.lastLogIndex() && rf.getLog(lastIndex).Term == lastTerm {
+	if lastIndex >= rf.lastLogIndex() && rf.getLogTerm(lastIndex) == lastTerm {
 		// retain log entries following last log from snapshot
 		rf.clearLogThrough(lastIndex)
 	} else {
@@ -357,7 +369,7 @@ func (rf *Raft) handleSnapshotRequest(req snapshotRequest) {
 		return
 	}
 	rf.debugPrint("snapshot", "creating snapshot for index %v", req.index)
-	rf.snapshot.LastTerm = rf.getLog(req.index).Term
+	rf.snapshot.LastTerm = rf.getLogTerm(req.index)
 	rf.clearLogThrough(req.index)
 	rf.snapshot.LastIndex = req.index
 	rf.snapshot.Data = req.snapshot
@@ -426,8 +438,8 @@ func (rf *Raft) sendOneAppendRequest(id int) {
 		}
 		return
 	} else {
-		prevLogIndex := nextIndex - 1
-		prevLogTerm := rf.getLog(prevLogIndex).Term
+		prevLogIndex := max(nextIndex-1, 0)
+		prevLogTerm := rf.getLogTerm(prevLogIndex)
 		args = AppendEntriesArgs{
 			Term:         rf.currentTerm,
 			LeaderId:     rf.me,
@@ -458,7 +470,7 @@ func (rf *Raft) requestAllVotes() {
 			continue
 		}
 		lastLogIndex := rf.lastLogIndex()
-		lastLogTerm := rf.getLog(lastLogIndex).Term
+		lastLogTerm := rf.getLogTerm(lastLogIndex)
 		args := RequestVoteArgs{
 			Term:         rf.currentTerm,
 			CandidateId:  rf.me,
@@ -542,10 +554,15 @@ func (rf *Raft) commitAndApply(newCommitIndex logIndex) {
 	}
 	rf.debugPrint("commit", "committing from %v until %v", startIndex, newCommitIndex)
 	for i := startIndex; i <= newCommitIndex; i++ {
+		entry, ok := rf.getLog(i)
+		if !ok {
+			rf.debugPrint("commit", "failed to apply log %v, not found", i)
+			continue
+		}
 		rf.applyCh <- raftapi.ApplyMsg{
 			CommandValid: true,
 			CommandIndex: int(i),
-			Command:      rf.getLog(i).Command,
+			Command:      entry.Command,
 		}
 	}
 	rf.commitIndex = newCommitIndex
@@ -561,12 +578,21 @@ func (rf *Raft) lastLogIndex() logIndex {
 	return rf.snapshot.LastIndex + logIndex(len(rf.log)-1)
 }
 
-// Get a log entry
-func (rf *Raft) getLog(index logIndex) entry {
-	if index <= rf.snapshot.LastIndex {
-		return entry{Term: rf.snapshot.LastTerm}
+// Get a log entry, with an 'ok' bool signifying if an entry is found
+func (rf *Raft) getLog(index logIndex) (entry, bool) {
+	i := rf.logIndex(index)
+	if i <= 0 || i >= len(rf.log) {
+		return entry{}, false
 	}
-	return rf.log[rf.logIndex(index)]
+	return rf.log[i], true
+}
+
+// Get term for a log entry. Returns snapshot term if log is in snapshot
+func (rf *Raft) getLogTerm(index logIndex) int {
+	if index <= rf.snapshot.LastIndex {
+		return rf.snapshot.LastTerm
+	}
+	return rf.log[rf.logIndex(index)].Term
 }
 
 // Find the index of the first log entry for `term`
@@ -608,7 +634,11 @@ func (rf *Raft) clearLogThrough(index logIndex) {
 
 // Create a copy of the log starting at `index`, inclusive until the end
 func (rf *Raft) copyLogFrom(index logIndex) []entry {
-	return slices.Clone(rf.log[rf.logIndex(index):])
+	if len(rf.log) == 1 {
+		return []entry{}
+	}
+	i := max(rf.logIndex(index), 1)
+	return slices.Clone(rf.log[i:])
 }
 
 // Insert log entries starting at a given index
@@ -648,7 +678,7 @@ func applicationWorker(in chan raftapi.ApplyMsg, out chan raftapi.ApplyMsg) {
 		select {
 		case msg := <-in:
 			q = append(q, msg)
-		case sendOut<-next:
+		case sendOut <- next:
 			q = q[1:]
 		}
 	}
@@ -713,7 +743,6 @@ var debugTopics = map[string]bool{
 	"snapshot":      true,
 }
 
-
 func (rf *Raft) debugPrint(topic string, format string, a ...any) {
 	if os.Getenv("RAFT_DEBUG") != "true" || !debugTopics[topic] {
 		return
@@ -726,6 +755,7 @@ func (rf *Raft) debugPrint(topic string, format string, a ...any) {
 	case candidate:
 		role = "candidate"
 	}
+	lastLog, _ := rf.getLog(rf.lastLogIndex())
 	part1 := fmt.Sprintf(
 		"[%v] %v %v  term:%v snap:%v log:%v/%v commit:%v last:{%v %v}",
 		t,
@@ -736,11 +766,11 @@ func (rf *Raft) debugPrint(topic string, format string, a ...any) {
 		len(rf.log)-1,
 		int(rf.snapshot.LastIndex)+len(rf.log)-1,
 		rf.commitIndex,
-		rf.getLog(rf.lastLogIndex()).Term,
-		rf.getLog(rf.lastLogIndex()).Command,
+		lastLog.Term,
+		lastLog.Command,
 	)
 	debugLen := 100
-	spaces := strings.Repeat(" ", debugLen - len(part1))
+	spaces := strings.Repeat(" ", debugLen-len(part1))
 
 	part2 := fmt.Sprintf(format, a...)
 	tester.Annotate(
