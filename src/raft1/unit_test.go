@@ -3,6 +3,9 @@ package raft
 import (
 	"reflect"
 	"testing"
+	"time"
+
+	"github.com/google/go-cmp/cmp"
 )
 
 func TestUnitSetLogEntries(t *testing.T) {
@@ -218,4 +221,41 @@ func TestUnitClearLogThrough(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestUnitHandleAppendRequest(t *testing.T) {
+	t.Run("does not report conflicts for snapshotted logs", func(t *testing.T) {
+		rf := &Raft{
+			log:           []entry{{0, nil}},
+			snapshot:      snapshot{LastIndex: 19, LastTerm: 3},
+			currentTerm:   4,
+			electionTimer: time.NewTimer(time.Hour),
+		}
+		t.Cleanup(func() {
+			rf.electionTimer.Stop()
+		})
+		ch := make(chan *AppendEntriesReply, 1)
+		req := appendRequest{
+			args: AppendEntriesArgs{
+				PrevLogIndex: 18,
+				PrevLogTerm:  1,
+				Entries:      []entry{{3, 123}},
+				Term:         4,
+			},
+			reply: ch,
+		}
+		rf.handleAppendRequest(req)
+		reply := *<-ch
+
+		want := AppendEntriesReply{
+			Term:          4,
+			Success:       true,
+			ConflictTerm:  0,
+			ConflictIndex: 0,
+			LastLogIndex:  19,
+		}
+		if !reflect.DeepEqual(reply, want) {
+			t.Errorf(cmp.Diff(reply, want))
+		}
+	})
 }

@@ -214,7 +214,7 @@ func (rf *Raft) handleAppendRequest(req appendRequest) {
 	// if the previous log entry does not match the leader, replace all logs of the wrong term
 	// find term start index and request more logs
 	myPrevLogTerm := rf.getLogTerm(args.PrevLogIndex)
-	if myPrevLogTerm != args.PrevLogTerm {
+	if myPrevLogTerm != args.PrevLogTerm && args.PrevLogIndex > rf.snapshot.LastIndex {
 		conflictIndex := args.PrevLogIndex
 		for conflictIndex > rf.snapshot.LastIndex && rf.getLogTerm(conflictIndex) == myPrevLogTerm {
 			conflictIndex--
