@@ -19,6 +19,11 @@ type Op struct {
 	Operation any // argument to StateMachine.DoOp
 }
 
+type opReply struct {
+	Ok    bool
+	Reply any
+}
+
 // A server (i.e., ../server.go) that wants to replicate itself calls
 // MakeRSM and must implement the StateMachine interface.  This
 // interface allows the rsm package to interact with the server for
@@ -39,8 +44,7 @@ type RSM struct {
 	maxraftstate int // snapshot if log grows this big
 	sm           StateMachine
 	term         int
-	replyChans   map[uuid.UUID]chan any
-	cancelChans  map[uuid.UUID]chan bool
+	replyChans   map[uuid.UUID]chan opReply
 	opTerms      map[int][]uuid.UUID
 }
 
@@ -67,8 +71,7 @@ func MakeRSM(servers []*labrpc.ClientEnd, me int, persister *tester.Persister, m
 		sm:           sm,
 		term:         1,
 		opTerms:      map[int][]uuid.UUID{},
-		replyChans:   map[uuid.UUID]chan any{},
-		cancelChans:  map[uuid.UUID]chan bool{},
+		replyChans:   map[uuid.UUID]chan opReply{},
 	}
 	if !tester.UseRaftStateMachine {
 		rsm.rf = raft.Make(servers, me, persister, rsm.applyCh)
@@ -83,8 +86,7 @@ func MakeRSM(servers []*labrpc.ClientEnd, me int, persister *tester.Persister, m
 					fmt.Println("receive command ", rsm.me)
 					replyCh := rsm.getReplyCh(op.Id)
 					select {
-					case replyCh <- reply:
-						close(replyCh)
+					case replyCh <- opReply{Ok: true, Reply: reply}:
 						rsm.mu.Lock()
 						delete(rsm.replyChans, op.Id)
 						rsm.mu.Unlock()
@@ -103,8 +105,11 @@ func MakeRSM(servers []*labrpc.ClientEnd, me int, persister *tester.Persister, m
 			rsm.mu.Lock()
 			for term > rsm.term {
 				for _, opId := range rsm.opTerms[rsm.term] {
-					rsm.cancelChans[opId] <- true
-					delete(rsm.replyChans, opId)
+					ch, ok := rsm.replyChans[opId]
+					if ok {
+						ch <- opReply{Ok: false}
+						delete(rsm.replyChans, opId)
+					}
 				}
 				rsm.term++
 			}
@@ -125,7 +130,7 @@ func (rsm *RSM) Raft() raftapi.Raft {
 func (rsm *RSM) Submit(req any) (rpc.Err, any) {
 	// Your solution needs to handle an rsm leader that has called Start() for a request submitted with Submit() but loses its leadership before the request is committed to the log. One way to do this is for the rsm to detect that it has lost leadership, by noticing that Raft's term has changed or a different request has appeared at the index returned by Start(), and return rpc.ErrWrongLeader from Submit(). If the ex-leader is partitioned by itself, it won't know about new leaders; but any client in the same partition won't be able to talk to a new leader either, so it's OK in this case for the server to wait indefinitely until the partition heals.
 
-	op, replyCh, cancelCh := rsm.makeOp(req)
+	op, replyCh := rsm.makeOp(req)
 	_, _, isLeader := rsm.rf.Start(op)
 
 	if !isLeader {
@@ -134,17 +139,15 @@ func (rsm *RSM) Submit(req any) (rpc.Err, any) {
 		rsm.mu.Unlock()
 		return rpc.ErrWrongLeader, nil
 	}
-
-	select {
-	case reply := <-replyCh:
-		return rpc.OK, reply
-	case <-cancelCh:
+	reply := <-replyCh
+	if !reply.Ok {
 		return rpc.ErrWrongLeader, nil
 	}
+	return rpc.OK, reply.Reply
 
 }
 
-func (rsm *RSM) makeOp(req any) (op Op, replyCh chan any, cancelChan chan bool) {
+func (rsm *RSM) makeOp(req any) (op Op, replyCh chan opReply) {
 	rsm.mu.Lock()
 	defer rsm.mu.Unlock()
 	op = Op{
@@ -153,12 +156,11 @@ func (rsm *RSM) makeOp(req any) (op Op, replyCh chan any, cancelChan chan bool) 
 		Operation: req,
 	}
 	rsm.opTerms[rsm.term] = append(rsm.opTerms[rsm.term], op.Id)
-	rsm.replyChans[op.Id] = make(chan any, 1)
-	rsm.cancelChans[op.Id] = make(chan bool, 1)
-	return op, rsm.replyChans[op.Id], rsm.cancelChans[op.Id]
+	rsm.replyChans[op.Id] = make(chan opReply, 1)
+	return op, rsm.replyChans[op.Id]
 }
 
-func (rsm *RSM) getReplyCh(opId uuid.UUID) chan any {
+func (rsm *RSM) getReplyCh(opId uuid.UUID) chan opReply {
 	rsm.mu.Lock()
 	defer rsm.mu.Unlock()
 	return rsm.replyChans[opId]
