@@ -420,7 +420,8 @@ func (rf *Raft) sendAllAppendRequests() {
 func (rf *Raft) sendOneAppendRequest(id int) {
 	lastSent := rf.appendLastSent[id]
 	if time.Since(lastSent) < heartbeatInterval {
-		return
+		// todo: run tests
+		// return
 	}
 	rf.appendLastSent[id] = time.Now()
 	nextIndex := rf.nextIndex[id]
@@ -723,6 +724,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.readPersist(persister.ReadRaftState(), persister.ReadSnapshot())
 
 	rf.debugPrint("server", "server %v created", me)
+	rf.debugPrint("server", "log: %v", rf.log)
 
 	go rf.actorLoop()
 	go applicationWorker(rf.applyCh, applyCh)
@@ -770,7 +772,7 @@ func (rf *Raft) debugPrint(topic string, format string, a ...any) {
 		lastLog.Command,
 	)
 	debugLen := 100
-	spaces := strings.Repeat(" ", debugLen-len(part1))
+	spaces := strings.Repeat(" ", max(debugLen-len(part1), 1))
 
 	part2 := fmt.Sprintf(format, a...)
 	tester.Annotate(

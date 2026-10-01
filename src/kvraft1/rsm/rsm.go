@@ -1,19 +1,22 @@
 package rsm
 
 import (
+	"fmt"
 	"sync"
+	"time"
+	"uuid"
 
 	"6.5840/kvsrv1/rpc"
 	"6.5840/labrpc"
-	"6.5840/raft1"
+	raft "6.5840/raft1"
 	"6.5840/raftapi"
-	"6.5840/tester1"
+	tester "6.5840/tester1"
 )
 
 type Op struct {
-	// Your definitions here.
-	// Field names must start with capital letters,
-	// otherwise RPC will break.
+	Me        int
+	Id        uuid.UUID
+	Operation any // argument to StateMachine.DoOp
 }
 
 // A server (i.e., ../server.go) that wants to replicate itself calls
@@ -35,7 +38,10 @@ type RSM struct {
 	applyCh      chan raftapi.ApplyMsg
 	maxraftstate int // snapshot if log grows this big
 	sm           StateMachine
-	// Your definitions here.
+	term         int
+	replyChans   map[uuid.UUID]chan any
+	cancelChans  map[uuid.UUID]chan bool
+	opTerms      map[int][]uuid.UUID
 }
 
 // servers[] contains the ports of the set of
@@ -59,10 +65,53 @@ func MakeRSM(servers []*labrpc.ClientEnd, me int, persister *tester.Persister, m
 		maxraftstate: maxraftstate,
 		applyCh:      make(chan raftapi.ApplyMsg),
 		sm:           sm,
+		term:         1,
+		opTerms:      map[int][]uuid.UUID{},
+		replyChans:   map[uuid.UUID]chan any{},
+		cancelChans:  map[uuid.UUID]chan bool{},
 	}
 	if !tester.UseRaftStateMachine {
 		rsm.rf = raft.Make(servers, me, persister, rsm.applyCh)
 	}
+	go func() {
+		for msg := range rsm.applyCh {
+			if msg.CommandValid {
+				op := msg.Command.(Op)
+				reply := rsm.sm.DoOp(op.Operation)
+
+				if op.Me == rsm.me {
+					fmt.Println("receive command ", rsm.me)
+					replyCh := rsm.getReplyCh(op.Id)
+					select {
+					case replyCh <- reply:
+						close(replyCh)
+						rsm.mu.Lock()
+						delete(rsm.replyChans, op.Id)
+						rsm.mu.Unlock()
+						fmt.Println("send ", op)
+					default:
+						fmt.Printf("channel closed for %v\n", op.Id)
+					}
+				}
+			}
+		}
+	}()
+
+	go func() {
+		for {
+			term, _ := rsm.rf.GetState()
+			rsm.mu.Lock()
+			for term > rsm.term {
+				for _, opId := range rsm.opTerms[rsm.term] {
+					rsm.cancelChans[opId] <- true
+					delete(rsm.replyChans, opId)
+				}
+				rsm.term++
+			}
+			rsm.mu.Unlock()
+			time.Sleep(50 * time.Millisecond)
+		}
+	}()
 	return rsm
 }
 
@@ -74,11 +123,43 @@ func (rsm *RSM) Raft() raftapi.Raft {
 // should return ErrWrongLeader if client should find new leader and
 // try again.
 func (rsm *RSM) Submit(req any) (rpc.Err, any) {
+	// Your solution needs to handle an rsm leader that has called Start() for a request submitted with Submit() but loses its leadership before the request is committed to the log. One way to do this is for the rsm to detect that it has lost leadership, by noticing that Raft's term has changed or a different request has appeared at the index returned by Start(), and return rpc.ErrWrongLeader from Submit(). If the ex-leader is partitioned by itself, it won't know about new leaders; but any client in the same partition won't be able to talk to a new leader either, so it's OK in this case for the server to wait indefinitely until the partition heals.
 
-	// Submit creates an Op structure to run a command through Raft;
-	// for example: op := Op{Me: rsm.me, Id: id, Req: req}, where req
-	// is the argument to Submit and id is a unique id for the op.
+	op, replyCh, cancelCh := rsm.makeOp(req)
+	_, _, isLeader := rsm.rf.Start(op)
 
-	// your code here
-	return rpc.ErrWrongLeader, nil // i'm dead, try another server.
+	if !isLeader {
+		rsm.mu.Lock()
+		delete(rsm.replyChans, op.Id)
+		rsm.mu.Unlock()
+		return rpc.ErrWrongLeader, nil
+	}
+
+	select {
+	case reply := <-replyCh:
+		return rpc.OK, reply
+	case <-cancelCh:
+		return rpc.ErrWrongLeader, nil
+	}
+
+}
+
+func (rsm *RSM) makeOp(req any) (op Op, replyCh chan any, cancelChan chan bool) {
+	rsm.mu.Lock()
+	defer rsm.mu.Unlock()
+	op = Op{
+		Me:        rsm.me,
+		Id:        uuid.New(),
+		Operation: req,
+	}
+	rsm.opTerms[rsm.term] = append(rsm.opTerms[rsm.term], op.Id)
+	rsm.replyChans[op.Id] = make(chan any, 1)
+	rsm.cancelChans[op.Id] = make(chan bool, 1)
+	return op, rsm.replyChans[op.Id], rsm.cancelChans[op.Id]
+}
+
+func (rsm *RSM) getReplyCh(opId uuid.UUID) chan any {
+	rsm.mu.Lock()
+	defer rsm.mu.Unlock()
+	return rsm.replyChans[opId]
 }

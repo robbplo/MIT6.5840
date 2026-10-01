@@ -174,7 +174,7 @@ func (ts *Test) checkCounter(v int, nsrv int) {
 	}
 	err := fmt.Sprintf("checkCounter: only %d srvs have %v instead of %d", n, v, nsrv)
 	tester.AnnotateCheckerFailure(err, err)
-	ts.Fatalf(err)
+	ts.Fatalf("%s", err)
 }
 
 func (ts *Test) countValue(v int) int {
